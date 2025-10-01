@@ -2,9 +2,8 @@ package repositories
 
 import (
 	"errors"
+	"scale/models"
 	"sync"
-
-	"scale/authentication/models"
 )
 
 type UserStore interface {

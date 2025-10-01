@@ -4,26 +4,23 @@ import (
 	"log"
 	"os"
 
-	"scale/authentication/routes" // Using the routes we built
-	// Assuming you have a database package
+	"scale/authentication/routes"
+	"scale/database"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/joho/godotenv"
 )
 
 func main() {
-	// Load environment variables from .env file
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using environment variables")
 	}
 
-	// Initialize the database connection
-	// You will need to implement this function in your database package
-	// database.Connect()
+	// Initialize the database connection on startup.
+	database.Connect()
 
 	app := fiber.New()
 
-	// Get secrets from environment variables
-	// Note: In production, you should handle missing secrets more gracefully
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
 		log.Fatal("JWT_SECRET is not set in the environment")

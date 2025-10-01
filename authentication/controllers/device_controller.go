@@ -1,150 +1,123 @@
 package controllers
 
 import (
-	"fmt"
+	"log"
 	"net/http"
-	"scale/authentication/models"
 	"scale/database"
+	"scale/ipmanager" // Assuming you have an IP allocator
+	"scale/models"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
 
-// RegisterDeviceRequest defines the expected payload for device registration
+// A simple in-memory IP allocator for demonstration.
+// In a real application, this might also be stored in the database.
+var ipAllocator, _ = ipmanager.NewIPAllocator("100.64.0.0/24", nil)
+
 type RegisterDeviceRequest struct {
-	DeviceID  string `json:"device_id"`
 	PublicKey string `json:"public_key"`
-	Endpoint  string `json:"endpoint,omitempty"`
+	// UserID is needed to associate the device with a user.
+	// This would typically come from the JWT claims.
+	UserID uint `json:"user_id"`
 }
 
-// HeartbeatRequest defines the payload for the heartbeat endpoint
 type HeartbeatRequest struct {
-	DeviceID string `json:"device_id"`
-	Endpoint string `json:"endpoint"`
+	PublicKey string `json:"public_key"`
+	Endpoint  string `json:"endpoint"`
 }
 
-// PeerConfig defines the WireGuard peer information returned to clients
 type PeerConfig struct {
 	PublicKey  string   `json:"public_key"`
 	AllowedIPs []string `json:"allowed_ips"`
 	Endpoint   string   `json:"endpoint,omitempty"`
 }
 
-func ListPeers(c *fiber.Ctx) error {
-	// The auth middleware places the user/device ID into c.Locals
-	requestingDeviceID, ok := c.Locals("x-user-id").(string)
-	if !ok || requestingDeviceID == "" {
-		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid or missing user ID in token"})
-	}
-
-	peers, err := database.GetActivePeersExcept(requestingDeviceID)
-	if err != nil {
-		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to retrieve peers"})
-	}
-
-	peerConfigs := make([]PeerConfig, 0, len(peers))
-	for _, peer := range peers {
-		peerConfigs = append(peerConfigs, PeerConfig{
-			PublicKey:  peer.PublicKey,
-			AllowedIPs: []string{fmt.Sprintf("%s/32", peer.AssignedIP)},
-			Endpoint:   peer.Endpoint,
-		})
-	}
-
-	return c.JSON(peerConfigs)
-}
-
-// RegisterDevice handles WireGuard device registration and updates
+// RegisterDevice now handles device registration with a real database.
 func RegisterDevice(c *fiber.Ctx) error {
 	var req RegisterDeviceRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 	}
 
-	// Note: You will need to implement the database functions like FindDeviceByID, CreateDevice etc.
-	device, err := database.FindDeviceByID(req.DeviceID)
+	// Check if device already exists.
+	device, err := database.FindDeviceByPublicKey(req.PublicKey)
 	if err != nil {
-		// This is just an example of handling a "not found" case to create a new device
-		// Your actual implementation might differ
-		if err.Error() == "record not found" {
-			ip, err := utils.IPAllocator.AllocateIP() // You need to implement the IPAllocator
+		// If the error is "record not found", we create a new device.
+		if err == gorm.ErrRecordNotFound {
+			log.Printf("Registering new device with public key: %s", req.PublicKey)
+
+			// Allocate a new IP address. We use /32 for a single host.
+			ip, err := ipAllocator.AllocateCIDR(32)
 			if err != nil {
 				return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "IP allocation failed"})
 			}
 
-			newDevice := &models.Device{ // Make sure you have a Device model in your models package
-				ID:         req.DeviceID,
+			newDevice := &models.Device{
 				PublicKey:  req.PublicKey,
 				AssignedIP: ip,
-				Endpoint:   req.Endpoint,
+				UserID:     req.UserID, // Associate with the user.
 			}
 
 			if err := database.CreateDevice(newDevice); err != nil {
+				// If creation fails, release the IP.
+				ipAllocator.ReleaseCIDR(ip)
 				return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create device"})
 			}
-			// Return the newly created device's info
 			return c.JSON(fiber.Map{
 				"assigned_ip": newDevice.AssignedIP,
 				"message":     "Registration successful",
 			})
 		}
-		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Database error on find"})
+		// For other database errors, return a server error.
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Database error"})
 	}
 
-	// If device exists, update it
-	device.PublicKey = req.PublicKey
-	device.Endpoint = req.Endpoint
-	if err := database.UpdateDevice(device); err != nil {
-		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update device"})
-	}
-
+	// If the device exists, we can simply return its info.
+	// You might add logic here to update its endpoint if provided.
+	log.Printf("Device with public key %s already registered.", req.PublicKey)
 	return c.JSON(fiber.Map{
 		"assigned_ip": device.AssignedIP,
-		"message":     "Device details updated successfully",
+		"message":     "Device already registered",
 	})
 }
 
-// GetPeerConfig returns WireGuard peer configurations for the device
+// GetPeerConfig now fetches real peers from the database.
 func GetPeerConfig(c *fiber.Ctx) error {
-	deviceID := c.Params("device_id")
-
-	device, err := database.FindDeviceByID(deviceID)
-	if err != nil || device == nil {
-		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
+	// The client's public key should be passed as a parameter.
+	clientPubKey := c.Params("publicKey")
+	if clientPubKey == "" {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "Device public key is required"})
 	}
 
-	peers, err := database.GetActivePeersExcept(deviceID)
+	peers, err := database.GetActivePeersExcept(clientPubKey)
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to retrieve peers"})
 	}
 
-	peerConfigs := make([]PeerConfig, 0, len(peers))
-	for _, peer := range peers {
-		peerConfigs = append(peerConfigs, PeerConfig{
+	peerConfigs := make([]PeerConfig, len(peers))
+	for i, peer := range peers {
+		peerConfigs[i] = PeerConfig{
 			PublicKey:  peer.PublicKey,
-			AllowedIPs: []string{peer.AssignedIP + "/32"},
+			AllowedIPs: []string{peer.AssignedIP}, // The IP itself implies /32
 			Endpoint:   peer.Endpoint,
-		})
+		}
 	}
 
 	return c.JSON(fiber.Map{
-		"device_ip":    device.AssignedIP,
 		"peer_configs": peerConfigs,
 	})
 }
 
-// Heartbeat handles updates to a device's endpoint for NAT traversal
+// Heartbeat now updates a device's endpoint in the database.
 func Heartbeat(c *fiber.Ctx) error {
 	var req HeartbeatRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 	}
 
-	if req.DeviceID == "" || req.Endpoint == "" {
-		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "DeviceID and Endpoint are required"})
-	}
-
-	device, err := database.FindDeviceByID(req.DeviceID)
-	if err != nil || device == nil {
+	device, err := database.FindDeviceByPublicKey(req.PublicKey)
+	if err != nil {
 		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
 	}
 
