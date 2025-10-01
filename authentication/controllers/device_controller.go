@@ -1,10 +1,10 @@
-\package controllers
+package controllers
 
 import (
+	"fmt"
 	"net/http"
-	"scale/authentication/models" // Assuming your device model is here
-	"scale/database"              // Assuming your database functions are here
-	"scale/utils"                 // Assuming your IP allocator is here
+	"scale/authentication/models"
+	"scale/database"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -27,6 +27,30 @@ type PeerConfig struct {
 	PublicKey  string   `json:"public_key"`
 	AllowedIPs []string `json:"allowed_ips"`
 	Endpoint   string   `json:"endpoint,omitempty"`
+}
+
+func ListPeers(c *fiber.Ctx) error {
+	// The auth middleware places the user/device ID into c.Locals
+	requestingDeviceID, ok := c.Locals("x-user-id").(string)
+	if !ok || requestingDeviceID == "" {
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid or missing user ID in token"})
+	}
+
+	peers, err := database.GetActivePeersExcept(requestingDeviceID)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to retrieve peers"})
+	}
+
+	peerConfigs := make([]PeerConfig, 0, len(peers))
+	for _, peer := range peers {
+		peerConfigs = append(peerConfigs, PeerConfig{
+			PublicKey:  peer.PublicKey,
+			AllowedIPs: []string{fmt.Sprintf("%s/32", peer.AssignedIP)},
+			Endpoint:   peer.Endpoint,
+		})
+	}
+
+	return c.JSON(peerConfigs)
 }
 
 // RegisterDevice handles WireGuard device registration and updates
@@ -131,4 +155,3 @@ func Heartbeat(c *fiber.Ctx) error {
 
 	return c.Status(http.StatusOK).JSON(fiber.Map{"message": "Heartbeat received"})
 }
-

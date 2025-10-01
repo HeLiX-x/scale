@@ -17,10 +17,3 @@ type IPAllocator struct {
 	reservedIPNets []*net.IPNet
 	mutex          sync.Mutex
 }
-
-func (a *IPAllocator) AllocateCIDR(prefixLen uint8) (string, error) {
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	// Allocation logic to be implemented here
-}

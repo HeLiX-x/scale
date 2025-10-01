@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"net/http"
-	"scale/internal/models"
+	"scale/authentication/models"
 	"scale/repositories"
 
 	"github.com/gin-gonic/gin"

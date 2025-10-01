@@ -2,8 +2,8 @@ package middleware
 
 import (
 	"net/http"
+	"scale/authentication/util/tokenutil"
 	"scale/domain"
-	"scale/internal/tokenutil"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"

@@ -1,3 +1,4 @@
+// ipmanager/services.go
 package ipmanager
 
 import (
@@ -37,7 +38,7 @@ func (a *IPAllocator) AllocateCIDR(prefixLen uint8) (string, error) {
 		return block, nil
 	}
 	blockSize := uint32(1 << (32 - prefixLen))
-	baseIPInt := ipToInt(a.baseIPNet.IP)
+	baseIPInt, _ := ipToInt(a.baseIPNet.IP)
 	candidateIPInt := baseIPInt
 	if a.lastIPNet != nil {
 		candidateIPInt = lastIpInBlockInt(a.lastIPNet) + 1
