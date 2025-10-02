@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
@@ -14,8 +15,7 @@ import (
 	"scale/models"   // Correctly imports from the central models package
 )
 
-// JWT Secret Key (in production, load from env/config)
-var secretKey = "your-secret-key"
+var secretKey = os.Getenv("JWT_SECRET")
 
 func Hello(c *fiber.Ctx) error {
 	return c.SendString("Hello, world!")
