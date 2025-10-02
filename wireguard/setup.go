@@ -20,7 +20,7 @@ import (
 const (
 	heartbeatInterval  = 30 * time.Second
 	peerUpdateInterval = 5 * time.Minute
-	wgInterface        = "netcafe"
+	// FIX: Removed the hardcoded interface name.
 )
 
 type PeerConfig struct {
@@ -29,12 +29,10 @@ type PeerConfig struct {
 	Endpoint   string   `json:"endpoint,omitempty"`
 }
 
-// FIX: This struct is now only for the peer configuration response.
 type PeerOnlyConfig struct {
 	Peers []PeerConfig `json:"peer_configs"`
 }
 
-// FIX: This new struct is specifically for the registration response.
 type RegistrationConfig struct {
 	AssignedIP string `json:"assigned_ip"`
 }
@@ -44,7 +42,6 @@ func main() {
 		log.Println("No .env file found, using environment variables.")
 	}
 
-	// 1. Initial Setup
 	privKey, pubKey, err := generateOrLoadKeys()
 	if err != nil {
 		log.Fatalf("Key setup failed: %v", err)
@@ -58,7 +55,9 @@ func main() {
 		log.Fatal("WG_CONTROL_SERVER, DEVICE_ID, and AUTH_TOKEN must be set in environment.")
 	}
 
-	// 2. FIX: Register device and get assigned IP first.
+	// FIX: Create a dynamic interface name from the device ID.
+	wgInterface := "wg-" + deviceID
+
 	log.Println("Registering with control server...")
 	regConfig, err := registerDeviceAndGetIP(serverURL, pubKey.String(), authToken)
 	if err != nil {
@@ -66,26 +65,23 @@ func main() {
 	}
 	log.Printf("Successfully registered. Assigned IP: %s", regConfig.AssignedIP)
 
-	// 3. Write a minimal config file.
 	configContent := fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = %s
-`, privKey.String(), regConfig.AssignedIP) // Use the IP from the registration config
+`, privKey.String(), regConfig.AssignedIP)
 	configPath := "/etc/wireguard/" + wgInterface + ".conf"
 
 	if err := writeConfigFile(configPath, configContent); err != nil {
 		log.Fatalf("Failed to write config file: %v. Ensure you are running with sudo.", err)
 	}
 
-	// 4. Start WireGuard interface
 	log.Printf("Starting WireGuard interface '%s'...", wgInterface)
 	if err := runCommand("wg-quick", "up", configPath); err != nil {
 		log.Fatalf("wg-quick up failed: %v", err)
 	}
 
-	// 5. FIX: Fetch the initial peer list in a separate step.
 	log.Println("Performing initial peer sync...")
-	peerConfig, err := fetchPeerConfig(serverURL, deviceID, authToken)
+	peerConfig, err := fetchPeerConfig(serverURL, pubKey.String(), authToken) // Use public key for fetching peers
 	if err != nil {
 		log.Printf("Initial peer fetch failed: %v. Will retry.", err)
 	} else {
@@ -94,19 +90,16 @@ Address = %s
 		}
 	}
 
-	// 6. Start Background Tasks
 	log.Println("WireGuard is running. Starting background services.")
-	go runHeartbeat(serverURL, pubKey.String(), authToken) // Use public key for heartbeat
-	go runPeerUpdater(serverURL, deviceID, authToken)
+	go runHeartbeat(serverURL, pubKey.String(), authToken)
+	go runPeerUpdater(serverURL, pubKey.String(), authToken) // Use public key for updates
 
-	// 7. Wait for Shutdown Signal
 	log.Println("Client is running. Press Ctrl+C to exit.")
 	waitForShutdown(configPath)
 }
 
 // --- Background Goroutines ---
 
-// FIX: Heartbeat now uses public key to identify the device.
 func runHeartbeat(serverURL, publicKey, authToken string) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
@@ -114,12 +107,10 @@ func runHeartbeat(serverURL, publicKey, authToken string) {
 	for {
 		<-ticker.C
 		log.Println("Sending heartbeat...")
-
 		payload, _ := json.Marshal(map[string]string{
 			"public_key": publicKey,
-			"endpoint":   "1.2.3.4:56789", // Placeholder for NAT traversal
+			"endpoint":   "1.2.3.4:56789",
 		})
-
 		req, err := http.NewRequest("POST", serverURL+"/api/devices/heartbeat", bytes.NewReader(payload))
 		if err != nil {
 			log.Printf("Heartbeat error (request creation): %v", err)
@@ -127,13 +118,11 @@ func runHeartbeat(serverURL, publicKey, authToken string) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+authToken)
-
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			log.Printf("Heartbeat error (sending): %v", err)
 			continue
 		}
-
 		if resp.StatusCode != http.StatusOK {
 			log.Printf("Heartbeat request failed with status: %s", resp.Status)
 		}
@@ -141,19 +130,23 @@ func runHeartbeat(serverURL, publicKey, authToken string) {
 	}
 }
 
-func runPeerUpdater(serverURL, deviceID, authToken string) {
+// FIX: Peer updater now uses the device's public key, which is more reliable.
+func runPeerUpdater(serverURL, publicKey, authToken string) {
 	ticker := time.NewTicker(peerUpdateInterval)
 	defer ticker.Stop()
 
 	for {
 		<-ticker.C
 		log.Println("Checking for peer updates...")
-
-		config, err := fetchPeerConfig(serverURL, deviceID, authToken)
+		config, err := fetchPeerConfig(serverURL, publicKey, authToken)
 		if err != nil {
 			log.Printf("Peer update error (fetching): %v", err)
 			continue
 		}
+		// This is a simplification; ideally, you'd get the interface name from a shared context.
+		// For this test, we re-derive it, assuming DEVICE_ID is consistent.
+		deviceID := os.Getenv("DEVICE_ID")
+		wgInterface := "wg-" + deviceID
 
 		if err := syncWireGuardPeers(wgInterface, config.Peers); err != nil {
 			log.Printf("Peer update error (syncing): %v", err)
@@ -163,29 +156,24 @@ func runPeerUpdater(serverURL, deviceID, authToken string) {
 
 // --- Helper Functions ---
 
-// FIX: New function to handle device registration.
 func registerDeviceAndGetIP(serverURL, publicKey, authToken string) (*RegistrationConfig, error) {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"public_key": publicKey,
 	})
-
 	req, err := http.NewRequest("POST", serverURL+"/api/devices/register", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+authToken)
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to server: %w", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("server returned non-OK status: %s", resp.Status)
 	}
-
 	var config RegistrationConfig
 	if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
 		return nil, fmt.Errorf("failed to decode server response: %w", err)
@@ -193,9 +181,9 @@ func registerDeviceAndGetIP(serverURL, publicKey, authToken string) (*Registrati
 	return &config, nil
 }
 
-// FIX: Renamed from fetchFullConfig to be more specific.
-func fetchPeerConfig(serverURL, deviceID, authToken string) (*PeerOnlyConfig, error) {
-	url := fmt.Sprintf("%s/api/devices/%s/peers", serverURL, deviceID)
+// FIX: Changed deviceID to publicKey for consistency.
+func fetchPeerConfig(serverURL, publicKey, authToken string) (*PeerOnlyConfig, error) {
+	url := fmt.Sprintf("%s/api/devices/%s/peers", serverURL, publicKey)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
