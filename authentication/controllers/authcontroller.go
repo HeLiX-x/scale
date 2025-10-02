@@ -15,8 +15,6 @@ import (
 	"scale/models"   // Correctly imports from the central models package
 )
 
-var secretKey = os.Getenv("JWT_SECRET")
-
 func Hello(c *fiber.Ctx) error {
 	return c.SendString("Hello, world!")
 }
@@ -67,6 +65,8 @@ func Register(c *fiber.Ctx) error {
 func Login(c *fiber.Ctx) error {
 	fmt.Println("Received a login request")
 
+	var secretKey = os.Getenv("JWT_SECRET")
+
 	var data map[string]string
 	if err := c.BodyParser(&data); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Failed to parse request body"})
@@ -113,6 +113,8 @@ func Login(c *fiber.Ctx) error {
 // User retrieves user info based on JWT in cookie
 func User(c *fiber.Ctx) error {
 	fmt.Println("Request to get user info")
+
+	var secretKey = os.Getenv("JWT_SECRET")
 
 	cookie := c.Cookies("jwt")
 
