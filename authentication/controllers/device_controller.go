@@ -86,7 +86,7 @@ func RegisterDevice(c *fiber.Ctx) error {
 // GetPeerConfig now fetches real peers from the database.
 func GetPeerConfig(c *fiber.Ctx) error {
 	// The client's public key should be passed as a parameter.
-	clientPubKey := c.Params("publicKey")
+	clientPubKey := c.Params("device_id")
 	if clientPubKey == "" {
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "Device public key is required"})
 	}
