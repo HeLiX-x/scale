@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"scale/database"
@@ -99,7 +100,7 @@ func GetPeerConfig(c *fiber.Ctx) error {
 	for i, peer := range peers {
 		peerConfigs[i] = PeerConfig{
 			PublicKey:  peer.PublicKey,
-			AllowedIPs: []string{peer.AssignedIP}, // The IP itself implies /32
+			AllowedIPs: []string{fmt.Sprintf("%s/32", peer.AssignedIP)},
 			Endpoint:   peer.Endpoint,
 		}
 	}
