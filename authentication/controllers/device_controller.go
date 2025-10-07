@@ -12,7 +12,7 @@ import (
 	"gorm.io/gorm"
 )
 
-var ipAllocator, _ = ipmanager.NewIPAllocator("100.64.0.0/24", nil)
+var ipAllocator, _ = ipmanager.NewIPAllocator("100.64.0.0/24")
 
 // FIX: Removed UserID from the request body.
 type RegisterDeviceRequest struct {
