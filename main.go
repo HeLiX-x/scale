@@ -19,6 +19,8 @@ func main() {
 	// Initialize the database connection on startup.
 	database.Connect()
 
+	database.ConnectRedis()
+
 	app := fiber.New()
 
 	jwtSecret := os.Getenv("JWT_SECRET")
