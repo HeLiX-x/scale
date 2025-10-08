@@ -86,8 +86,14 @@ func main() {
 	// Setup the routes, passing both secrets
 	routes.SetupRoutes(app, jwtSecret, deviceSecret)
 
-	log.Println("Starting server on port 8080...")
-	if err := app.Listen(":8080"); err != nil {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Starting server on port %s...", port)
+	// Use the port variable in your Listen call
+	if err := app.Listen(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }
