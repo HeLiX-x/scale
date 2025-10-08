@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -104,24 +105,41 @@ func GetPeerConfig(c *fiber.Ctx) error {
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "Device public key is required"})
 	}
 
-	peers, err := database.GetActivePeersExcept(clientPubKey)
+	// **CHANGE**: Step 1 - Fetch the device list from the Redis cache.
+	cachedDevicesJSON, err := database.Rdb.Get(database.Ctx, "cache:all_devices").Result()
 	if err != nil {
-		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to retrieve peers"})
+		// If the cache is empty for some reason, return an error.
+		// This should be rare as the background worker keeps it populated.
+		log.Printf("Device cache is not available: %v", err)
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to retrieve peer list from cache"})
 	}
 
+	// **CHANGE**: Step 2 - Deserialize the JSON and filter out the current client.
+	var allDevices []models.Device
+	if err := json.Unmarshal([]byte(cachedDevicesJSON), &allDevices); err != nil {
+		log.Printf("Failed to unmarshal cached devices: %v", err)
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to parse peer list"})
+	}
+
+	peers := make([]models.Device, 0, len(allDevices))
+	for _, device := range allDevices {
+		if device.PublicKey != clientPubKey {
+			peers = append(peers, device)
+		}
+	}
+
+	// **NO CHANGE**: Step 3 - The logic to check for online peers remains the same.
+	// We still check for live endpoints for each peer from the cached list.
 	peerConfigs := make([]PeerConfig, 0, len(peers))
 	for _, peer := range peers {
 		redisKey := fmt.Sprintf("device:endpoint:%s", peer.PublicKey)
-
 		endpoint, err := database.Rdb.Get(database.Ctx, redisKey).Result()
-
 		if err == redis.Nil {
-			continue
+			continue // Peer is offline
 		} else if err != nil {
 			log.Printf("Could not get endpoint for peer %s from Redis: %v", peer.PublicKey, err)
 			continue
 		}
-
 		peerConfigs = append(peerConfigs, PeerConfig{
 			PublicKey:  peer.PublicKey,
 			AllowedIPs: []string{peer.AssignedIP},

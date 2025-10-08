@@ -28,3 +28,9 @@ func GetActivePeersExcept(publicKey string) ([]models.Device, error) {
 	result := DB.Where("public_key <> ?", publicKey).Find(&devices)
 	return devices, result.Error
 }
+
+func GetAllDevices() ([]models.Device, error) {
+	var devices []models.Device
+	result := DB.Find(&devices)
+	return devices, result.Error
+}
