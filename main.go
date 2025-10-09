@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"scale/authentication/controllers"
 	"scale/authentication/routes"
 	"scale/database"
 
@@ -68,6 +69,8 @@ func main() {
 	database.Connect()
 
 	database.ConnectRedis()
+
+	controllers.InitIPAllocator()
 
 	go updateDeviceCache()
 

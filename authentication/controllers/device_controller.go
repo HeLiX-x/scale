@@ -18,7 +18,7 @@ import (
 
 const deviceHeartbeatTTL = 90 * time.Second
 
-var ipAllocator, _ = ipmanager.NewIPAllocator("100.64.0.0/24")
+var ipAllocator *ipmanager.IPAllocator
 
 type RegisterDeviceRequest struct {
 	PublicKey string `json:"public_key"`
@@ -33,6 +33,14 @@ type PeerConfig struct {
 	PublicKey  string   `json:"public_key"`
 	AllowedIPs []string `json:"allowed_ips"`
 	Endpoint   string   `json:"endpoint,omitempty"`
+}
+
+func InitIPAllocator() {
+	var err error
+	ipAllocator, err = ipmanager.NewIPAllocator("100.64.0.0/24")
+	if err != nil {
+		log.Fatalf("Failed to initialize IP allocator: %v", err)
+	}
 }
 
 func RegisterDevice(c *fiber.Ctx) error {
