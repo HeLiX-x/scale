@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -183,8 +184,12 @@ func registerDeviceAndGetIP(serverURL, publicKey, authToken string) (*Registrati
 
 // FIX: Changed deviceID to publicKey for consistency.
 func fetchPeerConfig(serverURL, publicKey, authToken string) (*PeerOnlyConfig, error) {
-	url := fmt.Sprintf("%s/api/devices/%s/peers", serverURL, publicKey)
-	req, err := http.NewRequest("GET", url, nil)
+	//url := fmt.Sprintf("%s/api/devices/%s/peers", serverURL, publicKey)
+
+	encodedPubKey := url.PathEscape(publicKey)
+	fullURL := fmt.Sprintf("%s/api/devices/%s/peers", serverURL, encodedPubKey)
+
+	req, err := http.NewRequest("GET", fullURL, nil)
 	if err != nil {
 		return nil, err
 	}
