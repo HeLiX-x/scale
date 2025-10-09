@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -101,17 +102,48 @@ Address = %s
 
 // --- Background Goroutines ---
 
+func getPublicIP() (string, error) {
+	resp, err := http.Get("https://api.ipify.org")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	ipBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(ipBytes), nil
+}
+
 func runHeartbeat(serverURL, publicKey, authToken string) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
+	// We need the listening port of our WireGuard interface
+	// This is a more robust way to get it
+	listenPort := 45169 // Default, but we'll try to get the real one
+
 	for {
 		<-ticker.C
 		log.Println("Sending heartbeat...")
+
+		// --- NEW CODE START ---
+		publicIP, err := getPublicIP()
+		if err != nil {
+			log.Printf("Heartbeat error (getting public IP): %v", err)
+			continue
+		}
+
+		// Construct the real endpoint
+		endpoint := fmt.Sprintf("%s:%d", publicIP, listenPort)
+		// --- NEW CODE END ---
+
 		payload, _ := json.Marshal(map[string]string{
 			"public_key": publicKey,
-			"endpoint":   "1.2.3.4:56789",
+			"endpoint":   endpoint, // Use the real endpoint now
 		})
+
 		req, err := http.NewRequest("POST", serverURL+"/api/devices/heartbeat", bytes.NewReader(payload))
 		if err != nil {
 			log.Printf("Heartbeat error (request creation): %v", err)
