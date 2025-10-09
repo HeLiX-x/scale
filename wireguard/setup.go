@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	heartbeatInterval  = 30 * time.Second
-	peerUpdateInterval = 5 * time.Minute
+	heartbeatInterval   = 30 * time.Second
+	peerUpdateInterval  = 5 * time.Minute
+	wireGuardListenPort = 51820
 	// FIX: Removed the hardcoded interface name.
 )
 
@@ -70,6 +71,7 @@ func main() {
 	configContent := fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = %s
+ListenPort = 51820 
 `, privKey.String(), regConfig.AssignedIP)
 	configPath := "/etc/wireguard/" + wgInterface + ".conf"
 
@@ -122,7 +124,7 @@ func runHeartbeat(serverURL, publicKey, authToken string) {
 
 	// We need the listening port of our WireGuard interface
 	// This is a more robust way to get it
-	listenPort := 45169 // Default, but we'll try to get the real one
+	listenPort := wireGuardListenPort // Use the constant
 
 	for {
 		<-ticker.C
