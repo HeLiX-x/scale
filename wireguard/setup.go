@@ -22,8 +22,7 @@ import (
 const (
 	heartbeatInterval   = 30 * time.Second
 	peerUpdateInterval  = 5 * time.Minute
-	wireGuardListenPort = 51820
-	// FIX: Removed the hardcoded interface name.
+	wireGuardListenPort = 51820 // Use the standard static port
 )
 
 type PeerConfig struct {
@@ -58,7 +57,6 @@ func main() {
 		log.Fatal("WG_CONTROL_SERVER, DEVICE_ID, and AUTH_TOKEN must be set in environment.")
 	}
 
-	// FIX: Create a dynamic interface name from the device ID.
 	wgInterface := "wg-" + deviceID
 
 	log.Println("Registering with control server...")
@@ -68,11 +66,12 @@ func main() {
 	}
 	log.Printf("Successfully registered. Assigned IP: %s", regConfig.AssignedIP)
 
+	// CORRECTED: Includes the static ListenPort
 	configContent := fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = %s
-ListenPort = 51820 
-`, privKey.String(), regConfig.AssignedIP)
+ListenPort = %d
+`, privKey.String(), regConfig.AssignedIP, wireGuardListenPort)
 	configPath := "/etc/wireguard/" + wgInterface + ".conf"
 
 	if err := writeConfigFile(configPath, configContent); err != nil {
@@ -85,7 +84,7 @@ ListenPort = 51820
 	}
 
 	log.Println("Performing initial peer sync...")
-	peerConfig, err := fetchPeerConfig(serverURL, pubKey.String(), authToken) // Use public key for fetching peers
+	peerConfig, err := fetchPeerConfig(serverURL, pubKey.String(), authToken)
 	if err != nil {
 		log.Printf("Initial peer fetch failed: %v. Will retry.", err)
 	} else {
@@ -96,7 +95,7 @@ ListenPort = 51820
 
 	log.Println("WireGuard is running. Starting background services.")
 	go runHeartbeat(serverURL, pubKey.String(), authToken)
-	go runPeerUpdater(serverURL, pubKey.String(), authToken) // Use public key for updates
+	go runPeerUpdater(serverURL, pubKey.String(), authToken)
 
 	log.Println("Client is running. Press Ctrl+C to exit.")
 	waitForShutdown(configPath)
@@ -122,28 +121,22 @@ func runHeartbeat(serverURL, publicKey, authToken string) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
-	// We need the listening port of our WireGuard interface
-	// This is a more robust way to get it
-	listenPort := wireGuardListenPort // Use the constant
-
 	for {
 		<-ticker.C
 		log.Println("Sending heartbeat...")
 
-		// --- NEW CODE START ---
 		publicIP, err := getPublicIP()
 		if err != nil {
 			log.Printf("Heartbeat error (getting public IP): %v", err)
 			continue
 		}
 
-		// Construct the real endpoint
-		endpoint := fmt.Sprintf("%s:%d", publicIP, listenPort)
-		// --- NEW CODE END ---
+		// CORRECTED: Uses the constant for the port
+		endpoint := fmt.Sprintf("%s:%d", publicIP, wireGuardListenPort)
 
 		payload, _ := json.Marshal(map[string]string{
 			"public_key": publicKey,
-			"endpoint":   endpoint, // Use the real endpoint now
+			"endpoint":   endpoint,
 		})
 
 		req, err := http.NewRequest("POST", serverURL+"/api/devices/heartbeat", bytes.NewReader(payload))
@@ -165,7 +158,6 @@ func runHeartbeat(serverURL, publicKey, authToken string) {
 	}
 }
 
-// FIX: Peer updater now uses the device's public key, which is more reliable.
 func runPeerUpdater(serverURL, publicKey, authToken string) {
 	ticker := time.NewTicker(peerUpdateInterval)
 	defer ticker.Stop()
@@ -178,8 +170,6 @@ func runPeerUpdater(serverURL, publicKey, authToken string) {
 			log.Printf("Peer update error (fetching): %v", err)
 			continue
 		}
-		// This is a simplification; ideally, you'd get the interface name from a shared context.
-		// For this test, we re-derive it, assuming DEVICE_ID is consistent.
 		deviceID := os.Getenv("DEVICE_ID")
 		wgInterface := "wg-" + deviceID
 
@@ -216,10 +206,7 @@ func registerDeviceAndGetIP(serverURL, publicKey, authToken string) (*Registrati
 	return &config, nil
 }
 
-// FIX: Changed deviceID to publicKey for consistency.
 func fetchPeerConfig(serverURL, publicKey, authToken string) (*PeerOnlyConfig, error) {
-	//url := fmt.Sprintf("%s/api/devices/%s/peers", serverURL, publicKey)
-
 	encodedPubKey := url.PathEscape(publicKey)
 	fullURL := fmt.Sprintf("%s/api/devices/%s/peers", serverURL, encodedPubKey)
 
@@ -268,7 +255,7 @@ func writeConfigFile(path, content string) error {
 	configDir := "/etc/wireguard"
 	if _, err := os.Stat(configDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(configDir, 0755); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", configDir, err)
+			return fmt.Errorf("failed to create directory %s: %w", err)
 		}
 	}
 	return os.WriteFile(path, []byte(content), 0600)
