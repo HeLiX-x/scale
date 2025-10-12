@@ -67,3 +67,10 @@ For questions and support, reach out via the GitHub repository issues or contact
 Scale is an evolving project with the goal of providing a robust and secure alternative to Tailscale for private networking needs.
 
 This version improves readability, proper formatting, and completes the "Start a client" section. It’s suitable as a professional project README.
+
+## Known Limitations (PoC Only)
+- IP allocation is sequential from hardcoded `100.64.0.0/24` — **no persistence or concurrency safety**.
+- Configs are **not signed** — clients trust server blindly (MITM risk).
+- **No NAT traversal**, peer health checks, or automatic sync.
+- Benchmark (`/benchmark`) is **local-only** (localhost, no auth, in-memory).
+- Not production-ready. Built for learning.
