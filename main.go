@@ -14,7 +14,10 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// TODO: Replace hardcoded IPAM with persistent, concurrent-safe allocation (e.g., PostgreSQL)
+// TODO: Sign configs with server key; clients should verify signatures
 // The Redis key for the cached device list
+
 const allDevicesCacheKey = "cache:all_devices"
 
 // How often to update the cache from PostgreSQL
