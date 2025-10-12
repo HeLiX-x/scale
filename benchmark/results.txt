@@ -22,4 +22,4 @@ Execution:
   iteration_duration: avg=1.16s, p(95)=1.22s
   iterations:         1388
 
-Environment: Free-tier cloud VM
+Environment: Free-tier cloud VM.
