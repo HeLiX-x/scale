@@ -89,8 +89,10 @@ func main() {
 		log.Fatal("DEVICE_AUTH_SECRET is not set in the environment")
 	}
 
+	stunController := controllers.NewStunController(jwtSecret)
+
 	// Setup the routes, passing both secrets
-	routes.SetupRoutes(app, jwtSecret, deviceSecret)
+	routes.SetupRoutes(app, jwtSecret, deviceSecret, stunController)
 
 	port := os.Getenv("PORT")
 	if port == "" {
