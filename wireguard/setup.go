@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -20,10 +18,33 @@ import (
 )
 
 const (
-	heartbeatInterval   = 30 * time.Second
-	peerUpdateInterval  = 5 * time.Minute
-	wireGuardListenPort = 51820 // Use the standard static port
+	pollInterval        = 30 * time.Second
+	wireGuardListenPort = 51820
 )
+
+type Endpoint struct {
+	IPv4 string `json:"ipv4,omitempty"`
+	IPv6 string `json:"ipv6,omitempty"`
+	Port int    `json:"port"`
+}
+
+type PeerInfo struct {
+	ID        string     `json:"id"`
+	PublicKey string     `json:"public_key"`
+	Endpoints []Endpoint `json:"endpoints"`
+}
+
+type EndpointResponse struct {
+	IPv4    string `json:"ipv4,omitempty"`
+	IPv6    string `json:"ipv6,omitempty"`
+	Port    string `json:"port"`
+	NATType string `json:"nat_type"`
+}
+
+type PollResponse struct {
+	StunToken string     `json:"stun_token"`
+	Peers     []PeerInfo `json:"peers"` // FIXED TYPO: Was json::"peers"
+}
 
 type PeerConfig struct {
 	PublicKey  string   `json:"public_key"`
@@ -66,7 +87,6 @@ func main() {
 	}
 	log.Printf("Successfully registered. Assigned IP: %s", regConfig.AssignedIP)
 
-	// CORRECTED: Includes the static ListenPort
 	configContent := fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = %s
@@ -83,103 +103,157 @@ ListenPort = %d
 		log.Fatalf("wg-quick up failed: %v", err)
 	}
 
-	log.Println("Performing initial peer sync...")
-	peerConfig, err := fetchPeerConfig(serverURL, pubKey.String(), authToken)
-	if err != nil {
-		log.Printf("Initial peer fetch failed: %v. Will retry.", err)
-	} else {
-		if err := syncWireGuardPeers(wgInterface, peerConfig.Peers); err != nil {
-			log.Printf("Initial peer sync failed: %v. Will retry.", err)
-		}
-	}
-
 	log.Println("WireGuard is running. Starting background services.")
-	go runHeartbeat(serverURL, pubKey.String(), authToken)
-	go runPeerUpdater(serverURL, pubKey.String(), authToken)
+
+	// --- ADDED: Start the new unified polling loop ---
+	go runServerPollingLoop(serverURL, pubKey.String(), authToken, wgInterface)
 
 	log.Println("Client is running. Press Ctrl+C to exit.")
 	waitForShutdown(configPath)
 }
 
-// --- Background Goroutines ---
+// --- NEW: Unified polling loop ---
+func runServerPollingLoop(serverURL, publicKey, authToken, wgInterface string) {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
 
-func getPublicIP() (string, error) {
-	resp, err := http.Get("https://api.ipify.org")
+	// Create a reusable HTTP client
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+
+	// Run once immediately on startup, then on the ticker
+	for ; ; <-ticker.C {
+		log.Println("Polling server for updates...")
+
+		// 1. Call /api/poll
+		pollResp, err := pollServer(httpClient, serverURL, authToken)
+		if err != nil {
+			log.Printf("Error polling server: %v", err)
+			continue
+		}
+
+		// 2. If we got a STUN token, call /api/stun
+		if pollResp.StunToken != "" {
+			ep, err := discoverEndpoint(httpClient, serverURL, pollResp.StunToken)
+			if err != nil {
+				log.Printf("Error discovering endpoint: %v", err)
+				continue
+			}
+
+			// Determine which IP to use
+			ip := ep.IPv4
+			if ip == "" {
+				ip = ep.IPv6
+			}
+
+			if ip == "" || ep.Port == "" {
+				log.Println("STUN response did not return a valid IP or Port")
+				continue
+			}
+
+			// 3. Send our discovered endpoint to the heartbeat endpoint
+			// This updates our endpoint in the server's Redis cache for other peers
+			endpoint := fmt.Sprintf("%s:%s", ip, ep.Port)
+			if err := updateHeartbeat(httpClient, serverURL, publicKey, authToken, endpoint); err != nil {
+				log.Printf("Error updating heartbeat: %v", err)
+			}
+		}
+
+		// 4. Sync WireGuard peers with the list we just got
+		// We need to convert the []PeerInfo to []PeerConfig
+		peerConfigs := make([]PeerConfig, 0, len(pollResp.Peers))
+		for _, p := range pollResp.Peers {
+			// In the future, p.Endpoints will be a list.
+			// For now, we just need the PublicKey and AllowedIPs
+			// The server will provide the live endpoint via the GetPeerConfig logic
+			peerConfigs = append(peerConfigs, PeerConfig{
+				PublicKey:  p.PublicKey,
+				AllowedIPs: []string{p.ID}, // This now expects the AssignedIP from the server
+				// Endpoint: Will be fetched live by the server, not set here.
+			})
+		}
+
+		// This function is defined in wg_dynamic.go
+		if err := syncWireGuardPeers(wgInterface, peerConfigs); err != nil {
+			log.Printf("Error syncing peers: %v", err)
+		}
+	}
+}
+
+// --- NEW: Helper for /api/poll ---
+func pollServer(client *http.Client, serverURL, authToken string) (*PollResponse, error) {
+	req, err := http.NewRequest("GET", serverURL+"/api/poll", nil)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+authToken)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	ipBytes, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned non-200 status: %s", resp.Status)
+	}
+
+	var pollResp PollResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pollResp); err != nil {
+		return nil, err
+	}
+
+	return &pollResp, nil
+}
+
+// --- NEW: Helper for /api/stun ---
+func discoverEndpoint(client *http.Client, serverURL, stunToken string) (*EndpointResponse, error) {
+	stunURL := fmt.Sprintf("%s/api/stun?token=%s", serverURL, stunToken)
+	resp, err := client.Get(stunURL)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return string(ipBytes), nil
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("stun endpoint returned non-200 status: %s", resp.Status)
+	}
+
+	var epResp EndpointResponse
+	if err := json.NewDecoder(resp.Body).Decode(&epResp); err != nil {
+		return nil, err
+	}
+	return &epResp, nil
 }
 
-func runHeartbeat(serverURL, publicKey, authToken string) {
-	ticker := time.NewTicker(heartbeatInterval)
-	defer ticker.Stop()
+// --- MODIFIED: Heartbeat function ---
+// This is no longer a loop. It's just a simple function to send an update.
+func updateHeartbeat(client *http.Client, serverURL, publicKey, authToken, endpoint string) error {
+	payload, _ := json.Marshal(map[string]string{
+		"public_key": publicKey,
+		"endpoint":   endpoint,
+	})
 
-	for {
-		<-ticker.C
-		log.Println("Sending heartbeat...")
-
-		publicIP, err := getPublicIP()
-		if err != nil {
-			log.Printf("Heartbeat error (getting public IP): %v", err)
-			continue
-		}
-
-		// CORRECTED: Uses the constant for the port
-		endpoint := fmt.Sprintf("%s:%d", publicIP, wireGuardListenPort)
-
-		payload, _ := json.Marshal(map[string]string{
-			"public_key": publicKey,
-			"endpoint":   endpoint,
-		})
-
-		req, err := http.NewRequest("POST", serverURL+"/api/devices/heartbeat", bytes.NewReader(payload))
-		if err != nil {
-			log.Printf("Heartbeat error (request creation): %v", err)
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+authToken)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			log.Printf("Heartbeat error (sending): %v", err)
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("Heartbeat request failed with status: %s", resp.Status)
-		}
-		resp.Body.Close()
+	req, err := http.NewRequest("POST", serverURL+"/api/devices/heartbeat", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("heartbeat request creation: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+authToken)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("heartbeat sending: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("heartbeat request failed with status: %s", resp.Status)
+	}
+	log.Println("Heartbeat update successful.")
+	return nil
 }
 
-func runPeerUpdater(serverURL, publicKey, authToken string) {
-	ticker := time.NewTicker(peerUpdateInterval)
-	defer ticker.Stop()
-
-	for {
-		<-ticker.C
-		log.Println("Checking for peer updates...")
-		config, err := fetchPeerConfig(serverURL, publicKey, authToken)
-		if err != nil {
-			log.Printf("Peer update error (fetching): %v", err)
-			continue
-		}
-		deviceID := os.Getenv("DEVICE_ID")
-		wgInterface := "wg-" + deviceID
-
-		if err := syncWireGuardPeers(wgInterface, config.Peers); err != nil {
-			log.Printf("Peer update error (syncing): %v", err)
-		}
-	}
-}
-
-// --- Helper Functions ---
+// --- UNCHANGED: Helper Functions Below ---
 
 func registerDeviceAndGetIP(serverURL, publicKey, authToken string) (*RegistrationConfig, error) {
 	payload, _ := json.Marshal(map[string]interface{}{
@@ -200,30 +274,6 @@ func registerDeviceAndGetIP(serverURL, publicKey, authToken string) (*Registrati
 		return nil, fmt.Errorf("server returned non-OK status: %s", resp.Status)
 	}
 	var config RegistrationConfig
-	if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
-		return nil, fmt.Errorf("failed to decode server response: %w", err)
-	}
-	return &config, nil
-}
-
-func fetchPeerConfig(serverURL, publicKey, authToken string) (*PeerOnlyConfig, error) {
-	encodedPubKey := url.PathEscape(publicKey)
-	fullURL := fmt.Sprintf("%s/api/devices/%s/peers", serverURL, encodedPubKey)
-
-	req, err := http.NewRequest("GET", fullURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+authToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to server: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned non-OK status: %s", resp.Status)
-	}
-	var config PeerOnlyConfig
 	if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
 		return nil, fmt.Errorf("failed to decode server response: %w", err)
 	}

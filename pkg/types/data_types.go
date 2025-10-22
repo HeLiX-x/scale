@@ -15,6 +15,7 @@ type PeerInfo struct {
 type EndpointResponse struct {
 	IPv4    string `json:"ipv4,omitempty"`
 	IPv6    string `json:"ipv6,omitempty"`
+	Port    string `json:"port"`
 	NATType string `json:"nat_type"` // e.g., "unknown", "easy", "likely_symmetric"
 }
 

@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"scale/database"
 	"scale/models"
-	"scale/pkg/types" // Import the new types package
+	"scale/pkg/types"
 	"sync"
 	"time"
 
@@ -61,7 +61,7 @@ func (s *StunController) Poll(c *fiber.Ctx) error {
 		// Here you would fetch the latest endpoint for each peer from Redis
 		// For now, we'll create a placeholder.
 		peers = append(peers, types.PeerInfo{
-			ID:        fmt.Sprintf("%d", device.ID), // Assuming device ID is what you use
+			ID:        device.AssignedIP,
 			PublicKey: device.PublicKey,
 			// Endpoints: will be populated in a later step
 		})
@@ -107,13 +107,16 @@ func (s *StunController) HandleStunRequest(c *fiber.Ctx) error {
 	}
 	s.natCache.Store(peerID, currentEndpoint)
 
-	resp := types.EndpointResponse{NATType: natType}
+	resp := types.EndpointResponse{
+		NATType: natType,
+		Port:    portStr,
+	}
+
 	if ip.To4() != nil {
 		resp.IPv4 = ipStr
 	} else {
 		resp.IPv6 = ipStr
 	}
-
 	return c.JSON(resp)
 }
 
