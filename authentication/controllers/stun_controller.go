@@ -55,16 +55,40 @@ func (s *StunController) Poll(c *fiber.Ctx) error {
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to parse peer list"})
 	}
 
+	clientPubKey := c.Get("X-Device-Public-Key")
+
 	// Convert database models to the PeerInfo type for the response
 	peers := make([]types.PeerInfo, 0, len(allDevices))
 	for _, device := range allDevices {
-		// Here you would fetch the latest endpoint for each peer from Redis
-		// For now, we'll create a placeholder.
+		// Don't send the client its own info
+		if device.PublicKey == clientPubKey {
+			continue
+		}
+
+		// Fetch the endpoints for this specific peer from Redis
+		redisKey := fmt.Sprintf("device:endpoints:%s", device.PublicKey)
+		endpointsJSON, err := database.Rdb.Get(database.Ctx, redisKey).Result()
+
+		var endpoints []types.Endpoint
+		if err == nil {
+			// Found endpoints, unmarshal them
+			if err := json.Unmarshal([]byte(endpointsJSON), &endpoints); err != nil {
+				log.Printf("Failed to unmarshal endpoints for peer %s: %v", device.PublicKey, err)
+				// Send peer anyway, but with no endpoints
+				endpoints = []types.Endpoint{}
+			}
+		} else {
+			// No endpoints found in Redis (peer is offline or hasn't reported)
+			// We'll send the peer with an empty endpoint list
+			endpoints = []types.Endpoint{}
+		}
+
 		peers = append(peers, types.PeerInfo{
 			ID:        device.AssignedIP,
 			PublicKey: device.PublicKey,
-			// Endpoints: will be populated in a later step
+			Endpoints: endpoints, // <-- POPULATE THE FIELD
 		})
+		// --- END OF FIX ---
 	}
 
 	resp := types.PollResponse{

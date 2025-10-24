@@ -79,6 +79,12 @@ type RegistrationConfig struct {
 	AssignedIP string `json:"assigned_ip"`
 }
 
+// HeartbeatPayload is the JSON structure sent to the /heartbeat endpoint
+type HeartbeatPayload struct {
+	SrflxEndpoint *Endpoint  `json:"srflx_endpoint,omitempty"`
+	HostEndpoints []Endpoint `json:"host_endpoints,omitempty"`
+}
+
 // --- Global State ---
 var (
 	activeProbes sync.Map // Key: wgtypes.Key, Value: *probeState
@@ -382,6 +388,21 @@ func probePeer(conn *net.UDPConn, peer PeerInfo, wgInterface string) {
 	}
 }
 
+// --- Polling loop to run the poll cycle ---
+func runServerPollingLoop(serverURL, publicKey, authToken, wgInterface string) {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	var lastSrflxEndpoint *Endpoint
+
+	// Run once immediately on startup
+	performPollCycle(httpClient, serverURL, publicKey, authToken, wgInterface, &lastSrflxEndpoint)
+
+	for range ticker.C {
+		performPollCycle(httpClient, serverURL, publicKey, authToken, wgInterface, &lastSrflxEndpoint)
+	}
+}
+
 // --- performPollCycle (Minor change: Call syncWireGuardPeers correctly) ---
 func performPollCycle(httpClient *http.Client, serverURL, publicKey, authToken, wgInterface string, lastSrflxEndpoint **Endpoint) {
 	// ... (Candidate Gathering, Poll, STUN, Heartbeat - unchanged) ...
@@ -543,8 +564,91 @@ func discoverEndpoint(client *http.Client, serverURL, stunToken string) (*Endpoi
 	return &epResp, nil
 }
 
-// --- Other helper functions (registerDeviceAndGetIP, generateOrLoadKeys, writeConfigFile, runCommand, waitForShutdown) ---
-// (Remain unchanged from the previous version)
+// updateHeartbeat sends the client's current endpoints to the control server
+func updateHeartbeat(client *http.Client, serverURL, publicKey, authToken string, srflx *Endpoint, hosts []Endpoint) error {
+	payload := HeartbeatPayload{
+		SrflxEndpoint: srflx,
+		HostEndpoints: hosts,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal heartbeat: %w", err)
+	}
+
+	// IMPORTANT: Make sure this API path matches your server's routes.go
+	req, err := http.NewRequest("POST", serverURL+"/api/devices/heartbeat", bytes.NewReader(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("failed to create heartbeat request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+authToken)
+	req.Header.Set("X-Device-Public-Key", publicKey) // Server needs to know who this is
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send heartbeat: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("heartbeat server returned non-200 status %s: %s", resp.Status, string(bodyBytes))
+	}
+
+	// log.Println("Heartbeat update successful.") // Optional: can be noisy
+	return nil
+}
+
+// getLocalEndpoints finds suitable local host IP addresses.
+func getLocalEndpoints(port int) ([]Endpoint, error) {
+	var endpoints []Endpoint
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get interfaces: %w", err)
+	}
+
+	for _, i := range ifaces {
+		// Skip down, loopback, and virtual/docker interfaces
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 ||
+			strings.Contains(i.Name, "virtual") || strings.Contains(i.Name, "docker") || strings.Contains(i.Name, "veth") {
+			continue
+		}
+
+		addrs, err := i.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+
+			// Add both IPv4 and IPv6 host candidates
+			if ip.To4() != nil {
+				endpoints = append(endpoints, Endpoint{
+					IP:       ip.String(),
+					Port:     port,
+					Protocol: "udp",
+					Type:     "host",
+				})
+			} else if ip.To16() != nil && !ip.IsLinkLocalUnicast() {
+				// You can also add IPv6 if your network supports it
+				// endpoints = append(endpoints, Endpoint{...})
+			}
+		}
+	}
+	return endpoints, nil
+}
 
 // --- registerDeviceAndGetIP is unchanged ---
 func registerDeviceAndGetIP(serverURL, publicKey, authToken string) (*RegistrationConfig, error) {

@@ -8,6 +8,7 @@ import (
 	"scale/database"
 	"scale/ipmanager"
 	"scale/models"
+	"scale/pkg/types"
 	"strconv"
 	"time"
 
@@ -25,8 +26,8 @@ type RegisterDeviceRequest struct {
 }
 
 type HeartbeatRequest struct {
-	PublicKey string `json:"public_key"`
-	Endpoint  string `json:"endpoint"`
+	SrflxEndpoint *types.Endpoint  `json:"srflx_endpoint"`
+	HostEndpoints []types.Endpoint `json:"host_endpoints"`
 }
 
 type PeerConfig struct {
@@ -96,11 +97,37 @@ func Heartbeat(c *fiber.Ctx) error {
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 	}
 
-	redisKey := fmt.Sprintf("device:endpoint:%s", req.PublicKey)
+	// GET THE PUBLIC KEY FROM THE HEADER (client is already sending it)
+	clientPubKey := c.Get("X-Device-Public-Key")
+	if clientPubKey == "" {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "Missing X-Device-Public-Key header"})
+	}
 
-	err := database.Rdb.Set(database.Ctx, redisKey, req.Endpoint, deviceHeartbeatTTL).Err()
+	redisKey := fmt.Sprintf("device:endpoints:%s", clientPubKey) // <-- Use a new key name
+
+	// Combine all endpoints into one list
+	allEndpoints := req.HostEndpoints
+	if req.SrflxEndpoint != nil {
+		allEndpoints = append(allEndpoints, *req.SrflxEndpoint)
+	}
+
+	if len(allEndpoints) == 0 {
+		// No endpoints, maybe just clear the key?
+		database.Rdb.Del(database.Ctx, redisKey)
+		return c.Status(http.StatusOK).JSON(fiber.Map{"message": "Heartbeat received (no endpoints)"})
+	}
+
+	// Serialize the list of endpoints to JSON
+	endpointsJSON, err := json.Marshal(allEndpoints)
 	if err != nil {
-		log.Printf("Failed to set heartbeat in Redis for %s: %v", req.PublicKey, err)
+		log.Printf("Failed to marshal endpoints for %s: %v", clientPubKey, err)
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to process endpoints"})
+	}
+
+	// Store the JSON string in Redis
+	err = database.Rdb.Set(database.Ctx, redisKey, string(endpointsJSON), deviceHeartbeatTTL).Err()
+	if err != nil {
+		log.Printf("Failed to set heartbeat in Redis for %s: %v", clientPubKey, err)
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to process heartbeat"})
 	}
 
