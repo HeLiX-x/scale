@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/pion/stun/v2"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -396,15 +397,15 @@ func runServerPollingLoop(serverURL, publicKey, authToken, wgInterface string) {
 	var lastSrflxEndpoint *Endpoint
 
 	// Run once immediately on startup
-	performPollCycle(httpClient, serverURL, publicKey, authToken, wgInterface, &lastSrflxEndpoint)
+	performPollCycle(httpClient, serverURL, publicKey, authToken, wgInterface, &lastSrflxEndpoint, udpConn)
 
 	for range ticker.C {
-		performPollCycle(httpClient, serverURL, publicKey, authToken, wgInterface, &lastSrflxEndpoint)
+		performPollCycle(httpClient, serverURL, publicKey, authToken, wgInterface, &lastSrflxEndpoint, udpConn)
 	}
 }
 
 // --- performPollCycle (Minor change: Call syncWireGuardPeers correctly) ---
-func performPollCycle(httpClient *http.Client, serverURL, publicKey, authToken, wgInterface string, lastSrflxEndpoint **Endpoint) {
+func performPollCycle(httpClient *http.Client, serverURL, publicKey, authToken, wgInterface string, lastSrflxEndpoint **Endpoint, conn *net.UDPConn) {
 	// ... (Candidate Gathering, Poll, STUN, Heartbeat - unchanged) ...
 	log.Println("Polling server for updates...")
 	var currentSrflxEndpoint *Endpoint
@@ -425,29 +426,14 @@ func performPollCycle(httpClient *http.Client, serverURL, publicKey, authToken, 
 	}
 
 	// 3. Perform STUN discovery
-	if pollResp.StunToken != "" {
-		epResp, err := discoverEndpoint(httpClient, serverURL, pollResp.StunToken)
-		if err != nil {
-			log.Printf("Error discovering endpoint via STUN: %v", err)
-			currentSrflxEndpoint = *lastSrflxEndpoint // Use cached
-		} else {
-			ip := epResp.IPv4
-			if ip == "" {
-				ip = epResp.IPv6
-			}
-			port, convErr := strconv.Atoi(epResp.Port)
-			if ip != "" && convErr == nil && port != 0 {
-				currentSrflxEndpoint = &Endpoint{IP: ip, Port: port, Protocol: "udp", Type: "srflx"}
-				*lastSrflxEndpoint = currentSrflxEndpoint // Update cache
-				log.Printf("Discovered srflx candidate: %s:%d (via HTTP STUN)", ip, port)
-			} else {
-				log.Printf("STUN response invalid, using cached: %v", convErr)
-				currentSrflxEndpoint = *lastSrflxEndpoint // Use cached
-			}
-		}
-	} else {
-		log.Println("No STUN token received, using cached srflx endpoint.")
+	ep, err := discoverUDPReflexiveAddr(conn, "stun.l.google.com:19302")
+	if err != nil {
+		log.Printf("UDP STUN discovery failed: %v. Using last known srflx endpoint.", err)
 		currentSrflxEndpoint = *lastSrflxEndpoint // Use cached
+	} else {
+		log.Printf("Discovered UDP srflx candidate: %s (via real STUN)", ep.String())
+		currentSrflxEndpoint = ep
+		*lastSrflxEndpoint = currentSrflxEndpoint // Update cache
 	}
 
 	// 4. Report candidates via Heartbeat
@@ -543,25 +529,69 @@ func pollServer(client *http.Client, serverURL, authToken, clientPubKey string) 
 	return &pollResp, nil
 }
 
-// --- discoverEndpoint is unchanged ---
-func discoverEndpoint(client *http.Client, serverURL, stunToken string) (*EndpointResponse, error) {
-	stunURL := fmt.Sprintf("%s/api/stun?token=%s", serverURL, stunToken)
-	resp, err := client.Get(stunURL)
+func discoverUDPReflexiveAddr(conn *net.UDPConn, stunServerAddr string) (*Endpoint, error) {
+	// 1. Resolve the STUN server address
+	serverAddr, err := net.ResolveUDPAddr("udp", stunServerAddr)
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body) // Read body for debugging
-		return nil, fmt.Errorf("stun endpoint returned non-200 status %s: %s", resp.Status, string(bodyBytes))
+		return nil, fmt.Errorf("failed to resolve STUN server address: %w", err)
 	}
 
-	var epResp EndpointResponse
-	if err := json.NewDecoder(resp.Body).Decode(&epResp); err != nil {
-		return nil, err
+	// 2. Build a STUN Binding Request
+	message := stun.MustBuild(stun.BindingRequest, stun.TransactionID)
+
+	// 3. Send the request
+	//    We set a deadline on the connection to handle timeouts.
+	if err := conn.SetWriteDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return nil, fmt.Errorf("failed to set write deadline: %w", err)
 	}
-	return &epResp, nil
+	if _, err := conn.WriteTo(message.Raw, serverAddr); err != nil {
+		return nil, fmt.Errorf("failed to send STUN request: %w", err)
+	}
+
+	// 4. Read the response
+	buf := make([]byte, 1500)
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return nil, fmt.Errorf("failed to set read deadline: %w", err)
+	}
+	n, _, err := conn.ReadFrom(buf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read STUN response: %w", err)
+	}
+
+	// 5. Reset the deadlines
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		log.Printf("Warning: failed to clear read deadline: %v", err) // Non-fatal
+	}
+	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+		log.Printf("Warning: failed to clear write deadline: %v", err) // Non-fatal
+	}
+
+	// 6. Parse the response
+	// 6. Parse the response
+	resp := new(stun.Message)
+	resp.Raw = buf[:n]                    // <-- Assign the raw bytes first
+	if err := resp.Decode(); err != nil { // <-- Then call Decode with no arguments
+		return nil, fmt.Errorf("failed to decode STUN response: %w", err)
+	}
+
+	// 7. Check for success
+	if resp.Type != stun.BindingSuccess {
+		return nil, fmt.Errorf("STUN request was not successful: %s", resp.Type)
+	}
+
+	// 8. Extract the XOR-Mapped Address
+	var xorAddr stun.XORMappedAddress
+	if err := xorAddr.GetFrom(resp); err != nil {
+		return nil, fmt.Errorf("failed to get XOR-Mapped-Address from STUN response: %w", err)
+	}
+
+	// Success!
+	return &Endpoint{
+		IP:       xorAddr.IP.String(),
+		Port:     xorAddr.Port,
+		Protocol: "udp",
+		Type:     "srflx",
+	}, nil
 }
 
 // updateHeartbeat sends the client's current endpoints to the control server
