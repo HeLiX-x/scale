@@ -86,12 +86,14 @@ While the total average throughput matched the UDP benchmark (~40 Gbps), the per
 
 This extreme variance is a known performance penalty associated with the WebSocket fallback layer at massive speeds. Generating and transmitting 40 Gigabits of WebSocket frames continuously triggers massive memory allocation rates in Go, leading to catastrophic Garbage Collector (GC) pauses ("stop-the-world" events) or TCP window buffer saturation. 
 
-*Future Optimization Goal:* To stabilize this jitter in later versions, the Relay engine and `HybridBind` WebSocket routines need memory-pooling (`sync.Pool`) for byte buffers to minimize heap allocations and relieve GC pressure during high-throughput failover.
+*Hypothesized cause (unconfirmed):* The jitter pattern is consistent with Go GC stop-the-world pauses or TCP window buffer saturation under sustained high-throughput WebSocket frame generation. This has not been confirmed via profiling (`GODEBUG=gctrace=1` or `pprof`). Future work: run GC trace to confirm, then evaluate `sync.Pool` for byte buffer reuse in the relay and `HybridBind` WebSocket routines if GC is verified as root cause.
 
 ---
 
-## Cross-NAT WAN Mesh Benchmark (WiFi ↔ Cellular Hotspot)
+## Same-LAN Tunnel Sanity Check (WiFi ↔ Cellular Hotspot, effectively same LAN)
 **Date:** July 17, 2026
+**Note:** Despite Laptop 2 being connected via a Jio mobile hotspot, sub-millisecond ping results confirm the underlying physical path was same-LAN (the hotspot phone was bridging to home WiFi, not routing via cellular internet). This is NOT a cross-WAN latency measurement. It validates that the WireGuard data plane established correctly and encrypted traffic flows cleanly. True cross-NAT latency evidence is in the relay fallback section below.
+
 **Environment:**
 - **Laptop 1:** Connected to home Airtel WiFi (`192.168.1.2`), AWS Mumbai relay (`13.232.184.59`)
 - **Laptop 2:** Connected to Jio mobile cellular hotspot (`10.70.143.3`)
@@ -167,14 +169,22 @@ if cgnatPrefix.Contains(ip) {
 ```
 
 ### Relay Fallback Validation
-During flapping, the WebSocket relay fallback was confirmed functional — pings continued to
-flow (at higher relay latency ~400-700ms via Mumbai) whenever the HealthMonitor correctly
-triggered `udp failed! shifting to relay`. The relay correctly maintained connectivity
-across cellular NAT boundaries where direct P2P hole punching failed.
+> [!IMPORTANT]
+> The relay timing and latency numbers below come from the **pre-fix, flapping build** (commit `23065f4`).
+> All 4 bugs were root-caused and fixed, but fixing them exposed a 5th deeper issue (poll cycle
+> overwriting SmartTrust's roamed endpoint on every 30s cycle), which prevented the WireGuard
+> data plane from establishing on the fixed build. The decision was made to demo the stable
+> known-flapping build rather than the broken fixed one. These numbers are presented as
+> "observed behavior before root cause was identified," not as post-fix validation metrics.
 
-### Clean Run Result (After Database Purge)
-After purging 16 stale device registrations from PostgreSQL and restarting:
+During flapping on the unfixed build, the WebSocket relay fallback was confirmed functional —
+pings continued to flow (at higher relay latency ~400-700ms via Mumbai) whenever the
+HealthMonitor correctly triggered `udp failed! shifting to relay`. The relay correctly
+maintained connectivity across cellular NAT boundaries where direct P2P hole punching failed.
+
+### Clean Run Result (After Database Purge, Unfixed Build)
+After purging 16 stale device registrations from PostgreSQL and restarting (reverted `23065f4` build):
 - Zero stale peer noise in logs
 - Exactly 2 active devices, clean `🔹 PEER CONNECT` for each
 - `udp failed! shifting to relay` → `switched to relay` → tunnel active
-- Ping confirmed working via tunnel: **avg 0.07ms, zero drops over 500+ packets**
+- Ping confirmed working via tunnel: **avg 0.07ms, zero drops over 500+ packets** (same-LAN path — see note above)
