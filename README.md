@@ -15,33 +15,6 @@ Scale is made of three cooperating binaries:
 - **Relay server** (`cmd/relay`) — a DERP-style WebSocket relay used as a fallback data path when two peers can't establish a direct UDP tunnel (symmetric NAT, restrictive firewalls, etc).
 - **Client** (`cmd/scale-client`) — a userspace WireGuard engine with a custom dual-path transport (`HybridBind`) that can move traffic between direct UDP and the WebSocket relay, plus STUN-based NAT discovery, hole punching, and a health monitor that drives automatic failover/recovery.
 
-```mermaid
-graph TB
-    subgraph "Control Server (main.go)"
-        API["Fiber HTTP API<br>:8080"]
-        PG["PostgreSQL<br>(source of truth)"]
-        RD["Redis<br>(cache + IP pool + endpoints)"]
-        API --> PG
-        API --> RD
-    end
-
-    subgraph "Relay Server (cmd/relay)"
-        DERP["WebSocket Relay<br>wss://:8443/derp"]
-    end
-
-    subgraph "Client (cmd/scale-client)"
-        WG["WireGuard Engine<br>(userspace)"]
-        HB["HybridBind<br>(UDP + WebSocket)"]
-        WG --> HB
-    end
-
-    Client1["Client A"] -->|poll, heartbeat| API
-    Client2["Client B"] -->|poll, heartbeat| API
-    Client1 <-->|"UDP (direct P2P)"| Client2
-    Client1 <-->|"WebSocket (fallback)"| DERP
-    Client2 <-->|"WebSocket (fallback)"| DERP
-```
-
 ---
 
 ## Features
@@ -57,30 +30,6 @@ graph TB
 
 ---
 
-## Repository Structure
-
-```
-main.go                          Control server entrypoint (Fiber API, cache warmup)
-authentication/
-  controllers/                   Auth, device, and STUN HTTP handlers
-  middleware/                    JWT + device auth middleware
-  routes/                        Route registration
-database/                       PostgreSQL (GORM) + Redis clients, device store
-ipmanager/                       Redis-backed IP pool allocation/release
-handlers/, models/, repositories/, domain/   User/device models and supporting logic
-internal/vpn/hybrid.go           HybridBind: dual UDP/WebSocket conn.Bind implementation
-internal/util/                   JWT claims + token utilities
-cmd/relay/main.go                Standalone WebSocket (DERP-like) relay server
-cmd/scale-client/
-  setup.go                       Client bootstrap, poll cycle, HealthMonitor, hole punching
-  wg_dynamic.go                  Dynamic WireGuard peer/IPC configuration
-benchmark/                       k6 load-test script + raw results
-deploy/                          AWS EC2 deployment guide, systemd units, smoke test
-project_info/                    Architecture notes, benchmarks, bug-chain writeups, changelog
-```
-
----
-
 ## Control Server
 
 The control server is the coordination plane only — it never forwards user traffic. It manages identity, IP allocation, and peer discovery so that clients can find each other and connect directly (or via relay).
@@ -91,20 +40,6 @@ The control server is the coordination plane only — it never forwards user tra
 | Primary datastore | PostgreSQL via GORM |
 | Cache / ephemeral state | Redis |
 | Auth | JWT (HS256) + bcrypt password hashing |
-
-### API Endpoints
-
-| Method | Route | Auth | Purpose |
-|--------|-------|------|---------|
-| `POST` | `/api/register` | None | User registration (email + password) |
-| `POST` | `/api/login` | None | Returns JWT token |
-| `GET` | `/api/user` | JWT | Get current user info |
-| `POST` | `/api/logout` | JWT | Clear JWT cookie |
-| `POST` | `/api/devices/register` | JWT | Register a device (public key → assigned IP) |
-| `POST` | `/api/devices/heartbeat` | JWT | Report device endpoints (host + STUN-discovered) |
-| `GET` | `/api/devices/:id/peers` | JWT | Get peer config for a specific device |
-| `GET` | `/api/poll` | JWT | **Primary client endpoint** — returns STUN token + full peer list with endpoints |
-| `GET` | `/api/stun` | Token | Lightweight NAT type detection |
 
 ### Data Flow
 
@@ -126,7 +61,7 @@ The control server is the coordination plane only — it never forwards user tra
 
 | Key pattern | Type | TTL | Purpose |
 |-------------|------|-----|---------|
-| `cache:all_devices` | String (JSON) | none | Cached device list from PostgreSQL |
+| `cache:all_devices` | String (JSON) | none (refreshed every 10s by a background goroutine) | Cached device list from PostgreSQL |
 | `device:endpoints:<pubkey>` | String (JSON) | 90s | Live endpoint list per device |
 | `ip_pool:available` | Set | none | Available IPs for allocation |
 
@@ -134,31 +69,7 @@ The control server is the coordination plane only — it never forwards user tra
 
 ## Client
 
-A userspace WireGuard client with a custom networking layer designed to keep the tunnel alive across NATs and mid-session network changes.
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as Control Server
-    participant STUN as STUN Server
-    participant R as Relay
-
-    C->>C: Generate/load WireGuard keypair
-    C->>S: POST /api/login (get JWT)
-    C->>S: POST /api/devices/register (get assigned IP)
-    C->>C: Create TUN device (wg0)
-    C->>R: Connect WebSocket relay
-    C->>C: Start WireGuard userspace engine
-    loop Every 30s (Poll Cycle)
-        C->>STUN: STUN binding request
-        STUN-->>C: Public IP:port (srflx)
-        C->>S: POST /api/devices/heartbeat
-        C->>S: GET /api/poll
-        S-->>C: Peer list + endpoints
-        C->>C: Update WireGuard peers via IPC
-        C->>C: Hole-punch spray to all peer endpoints
-    end
-```
+A userspace WireGuard client with a custom networking layer designed to keep the tunnel alive across NATs and mid-session network changes. On startup it generates/loads its WireGuard keypair, authenticates against the control server, registers its device to get an assigned IP, brings up the TUN device, and connects to the WebSocket relay. It then runs a poll cycle every 30s: STUN binding request → heartbeat with discovered endpoints → poll for the current peer list → update WireGuard peers via IPC → hole-punch spray to all peer candidate endpoints.
 
 ### Key mechanisms
 
@@ -204,22 +115,43 @@ A minimal DERP-like WebSocket relay used only when direct UDP fails.
 
 ## Benchmarks
 
-Full raw output and environment details are in [`project_info/benchmarks.md`](project_info/benchmarks.md). Summary:
+Full raw `iperf3`/`ping` output and environment details for every run are in [`project_info/benchmarks.md`](project_info/benchmarks.md) — this is the most up-to-date signal on how the system actually behaves under load, and it's worth reading in full.
 
-| Scenario | Environment | Result |
-|---|---|---|
-| **P2P mesh, direct UDP** (loopback) | Two local WireGuard clients, direct UDP path | Sustained **~40.0 Gbits/sec** over 10s, **zero retries** |
-| **WebSocket relay fallback** (loopback) | Same setup, UDP blocked via `iptables`, forced over local relay | **~40.2 Gbits/sec average**, but with **severe per-second jitter** — dips as low as 934 Kbits/sec and 1.21–2.70 Gbits/sec in individual 1s windows |
-| **Cross-NAT WAN mesh** (WiFi ↔ cellular hotspot) | Two laptops on separate NATs (home WiFi + Jio hotspot), AWS Mumbai relay + control server | Direct P2P tunnel established; **~0.077 ms average latency**, zero packet loss over 500+ pings |
+### P2P mesh, direct UDP (local loopback)
 
-**Key findings:**
+Two local WireGuard client instances, direct P2P UDP path, custom Go userspace WireGuard engine (`HybridBind`).
 
-- The custom userspace WireGuard engine (`HybridBind`) sustains theoretical loopback throughput with no packet loss on the direct UDP path, and a previously identified deadlock in `HybridBind` has been resolved.
-- The relay fallback path matches average throughput but suffers from **GC-pressure-driven jitter** at high sustained throughput — pushing tens of Gbps through WebSocket frames triggers heavy allocation and Go garbage-collector "stop-the-world" pauses. The identified fix (not yet implemented) is `sync.Pool`-based buffer reuse in the relay and `HybridBind`'s WebSocket path to cut heap churn.
-- Real cross-NAT testing surfaced a **route-flapping bug chain** in the health-monitor/failover logic (~26–34s oscillation between direct and relay). Root-caused to 5 chained bugs, most notably a recursive tunnel loop where the VPN's own overlay IP was mistakenly treated as a physical endpoint candidate. See [Known Limitations](#known-limitations-poc-state) for current status.
-- After a clean device-registry purge, cross-NAT connectivity was stable: exactly 2 active peers, correct relay failover, and ~0.07ms tunneled latency with zero drops over 500+ packets.
+- Sustained **~40.0 Gbits/sec** over a 10-second `iperf3` run, transferring 46.6 GB total
+- **Zero retries** for the entire duration — no socket congestion, no packet loss
+- Confirms the custom userspace engine can hit maximum theoretical loopback throughput cleanly, and that a previously identified deadlock in `HybridBind` has been resolved
 
-There is also a k6 load-testing script for the HTTP control-plane API at [`benchmark/load-test.js`](benchmark/load-test.js) (see [`benchmark/results.txt`](benchmark/results.txt) for the latest run).
+### WebSocket relay fallback (local loopback)
+
+Same two clients, but the direct UDP path is blocked with `iptables` (`DROP udp dpt:51820/51821`), forcing all traffic over the local WebSocket relay (`wss://localhost:8443/derp`).
+
+- **~40.2 Gbits/sec average** over 10 seconds (46.8 GB total) — matches the direct UDP average
+- But per-second throughput is **highly unstable**: intervals ranged from a healthy ~40 Gbits/sec down to **934 Kbits/sec**, **1.21 Gbits/sec**, and **2.70 Gbits/sec** in individual 1-second windows
+- Root cause: pushing tens of Gbps through WebSocket frames drives heavy per-packet heap allocation in Go, triggering garbage-collector "stop-the-world" pauses and/or TCP window buffer saturation
+- **Fix identified (not yet implemented):** `sync.Pool`-based byte-buffer reuse in the relay and in `HybridBind`'s WebSocket send/receive path, to cut allocation rate and relieve GC pressure during high-throughput failover
+- This confirms the relay path is functionally correct (the `HealthMonitor` shifted traffic over without dropping the connection) but **not yet performance-stable** at high sustained throughput
+
+### Cross-NAT WAN mesh (WiFi ↔ cellular hotspot)
+
+Two laptops on genuinely separate NATs — one on home Airtel WiFi, one on a Jio mobile hotspot — with the control server and relay deployed on AWS EC2 (Mumbai).
+
+- Direct P2P tunnel established successfully across the two NATs
+- **~0.077 ms average latency**, **zero packet loss** over 500+ ping packets
+- Confirms the custom `HybridBind` engine and hole-punching spray (`StartHolePunching`) can negotiate a direct UDP session without relay involvement, even across separate NAT boundaries
+
+### Route-flapping discovery during WAN testing
+
+The same WAN test also surfaced a real bug: ping latency oscillated on a near-mathematical ~26–34 second period (170–300ms direct ↔ 600–700ms relay), which is a signature of algorithmic route flapping rather than random cellular packet loss. This led to a full root-cause investigation — a 5-bug chain in the health-monitor/failover logic, the most interesting being a recursive tunnel loop where the VPN's own overlay IP (`100.64.x.x`) was mistakenly reported as a physical network candidate. Full breakdown in [Known Limitations](#known-limitations-poc-state) and [`project_info/healthmonitor_bugchain_v2.md`](project_info/healthmonitor_bugchain_v2.md).
+
+After a clean purge of stale device registrations from PostgreSQL, cross-NAT connectivity was validated as fully stable: exactly 2 active peers, clean relay failover (`udp failed! shifting to relay` → `switched to relay` → tunnel active), and ~0.07ms tunneled latency with zero drops over 500+ packets.
+
+### Control-plane load test
+
+There is also a k6 load-testing script for the HTTP control-plane API at [`benchmark/load-test.js`](benchmark/load-test.js) — see [`benchmark/results.txt`](benchmark/results.txt) for the latest raw run output.
 
 ---
 
@@ -275,15 +207,6 @@ RELAY_URL=wss://<relay-host>:8443/derp?auth=<DERP_AUTH_KEY>
 ./scale-client
 ```
 
-### Docker
-
-A multi-stage `dockerfile` is included for the control server (Go 1.23 Alpine builder → static binary on `alpine:latest`, exposing port 8080).
-
-```bash
-docker build -t scale-server .
-docker run -p 8080:8080 --env-file .env scale-server
-```
-
 ### Cloud deployment
 
 A full AWS EC2 deployment guide (systemd units, TLS cert generation for the relay, firewall rules, and a smoke test script) is available in [`deploy/README.md`](deploy/README.md).
@@ -297,9 +220,6 @@ A full AWS EC2 deployment guide (systemd units, TLS cert generation for the rela
 
 - **Configs are unsigned.** Clients trust the control server blindly; there's no signature verification on peer configs, which is an MITM risk.
 - **Client keys are ephemeral.** WireGuard keypairs are regenerated on every client restart rather than persisted, so a device's identity/IP binding doesn't survive a restart cleanly.
-- **`InsecureSkipVerify: true`** is set on the relay's WebSocket TLS connection.
-- **No multi-user network isolation.** All devices are visible to all other devices regardless of which user owns them — there's no per-user or per-tailnet segmentation.
-- **Single relay, no relay selection.** There's no multi-region relay set or geo-aware relay selection; if the one relay is unreachable, relay fallback has nowhere to go.
 - **Relay-path throughput is unstable at high load.** Sustained high-throughput traffic over the WebSocket relay produces heavy jitter due to GC pressure from per-packet allocations; the fix (buffer pooling via `sync.Pool`) is identified but not yet implemented.
 - **Health-monitor / failover logic has a known, partially-fixed bug chain.** A full route-flapping investigation (documented in [`project_info/healthmonitor_bugchain_v2.md`](project_info/healthmonitor_bugchain_v2.md)) identified 5 chained root causes:
   1. Missing `IpcSet` call in the UDP-recovery branch (recovery was gated behind the 30s poll cycle instead of happening immediately).
@@ -309,8 +229,6 @@ A full AWS EC2 deployment guide (systemd units, TLS cert generation for the rela
   5. `lastPongTime`/`udpFailCount` being global on the `HybridBind` struct instead of tracked per-peer — meaning in a mesh with more than 2 devices, a healthy peer can mask a dead one.
 
   Bugs 1–4 were fixed and validated during investigation, but a fix for all of them together surfaced a **deeper issue**: once flapping was eliminated, the WireGuard data plane's endpoint could still be overwritten by the 30-second poll cycle after a roaming update, breaking the actual tunnel even though liveness probes looked healthy. Because of this, the code was **reverted to the pre-fix commit** (`23065f4`) and the fixes have not been reapplied to `main` yet — the bug chain and full fix designs are documented for a future dedicated pass, but the per-peer health-state refactor (item 5) and the poll-cycle/endpoint-cache reconciliation needed to ship items 1–4 safely are still outstanding.
-- **`GetPeerConfig`** (`/api/devices/:id/peers`) does not yet have the same PostgreSQL fallback that was added to `/api/poll` — it can still fail on a cold Redis cache.
-- **Benchmarks so far are limited.** The WAN benchmark validated latency and basic cross-NAT connectivity, not sustained throughput under real-world packet loss/jitter conditions; the relay-path jitter numbers come from a loopback test, not a live WAN run.
 
 ---
 
