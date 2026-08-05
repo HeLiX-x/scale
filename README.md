@@ -235,4 +235,4 @@ A full AWS EC2 deployment guide (systemd units, TLS cert generation for the rela
 
 ## License
 
-This project is currently unlicensed. Reach out via GitHub issues for licensing inquiries.
+MIT — see [LICENSE](LICENSE).
