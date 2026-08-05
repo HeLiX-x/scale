@@ -117,6 +117,14 @@ A minimal DERP-like WebSocket relay used only when direct UDP fails.
 
 Full raw `iperf3`/`ping` output and environment details for every run are in [`project_info/benchmarks.md`](project_info/benchmarks.md) — this is the most up-to-date signal on how the system actually behaves under load, and it's worth reading in full.
 
+### Summary
+
+| Scenario | Avg. Throughput | Stability | Latency |
+|---|---|---|---|
+| Direct UDP (loopback) | ~40.0 Gbits/sec | Zero retries, no jitter | — |
+| WebSocket relay (loopback) | ~40.2 Gbits/sec | Severe jitter — dips to 934 Kbits/sec | — |
+| Cross-NAT WAN (WiFi ↔ cellular) | — | Zero packet loss over 500+ pings | ~0.077 ms avg |
+
 ### P2P mesh, direct UDP (local loopback)
 
 Two local WireGuard client instances, direct P2P UDP path, custom Go userspace WireGuard engine (`HybridBind`).
