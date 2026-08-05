@@ -229,14 +229,7 @@ A full AWS EC2 deployment guide (systemd units, TLS cert generation for the rela
 - **Configs are unsigned.** Clients trust the control server blindly; there's no signature verification on peer configs, which is an MITM risk.
 - **Client keys are ephemeral.** WireGuard keypairs are regenerated on every client restart rather than persisted, so a device's identity/IP binding doesn't survive a restart cleanly.
 - **Relay-path throughput is unstable at high load.** Sustained high-throughput traffic over the WebSocket relay produces heavy jitter due to GC pressure from per-packet allocations; the fix (buffer pooling via `sync.Pool`) is identified but not yet implemented.
-- **Health-monitor / failover logic has a known, partially-fixed bug chain.** A full route-flapping investigation (documented in [`project_info/healthmonitor_bugchain_v2.md`](project_info/healthmonitor_bugchain_v2.md)) identified 5 chained root causes:
-  1. Missing `IpcSet` call in the UDP-recovery branch (recovery was gated behind the 30s poll cycle instead of happening immediately).
-  2. `Send()` incorrectly resetting the failure counter on successful local socket writes, masking real path failures.
-  3. Keepalive probes locked to a stale initial address, not updated on peer roaming.
-  4. The client's own VPN overlay IP (`100.64.x.x`) being reported as a physical endpoint candidate, causing a recursive tunnel loop that produced false liveness signals.
-  5. `lastPongTime`/`udpFailCount` being global on the `HybridBind` struct instead of tracked per-peer — meaning in a mesh with more than 2 devices, a healthy peer can mask a dead one.
-
-  Bugs 1–4 were fixed and validated during investigation, but a fix for all of them together surfaced a **deeper issue**: once flapping was eliminated, the WireGuard data plane's endpoint could still be overwritten by the 30-second poll cycle after a roaming update, breaking the actual tunnel even though liveness probes looked healthy. Because of this, the code was **reverted to the pre-fix commit** (`23065f4`) and the fixes have not been reapplied to `main` yet — the bug chain and full fix designs are documented for a future dedicated pass, but the per-peer health-state refactor (item 5) and the poll-cycle/endpoint-cache reconciliation needed to ship items 1–4 safely are still outstanding.
+- **Health-monitor / failover logic has a documented bug chain** (5 root causes identified, fix design in [`project_info/healthmonitor_bugchain_v2.md`](project_info/healthmonitor_bugchain_v2.md)) — deferred to v2 along with a full per-peer state refactor.
 
 ---
 
