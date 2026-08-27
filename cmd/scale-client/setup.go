@@ -45,6 +45,13 @@ var activeSprayers sync.Map
 // peer disappears or the client shuts down.
 var activeKeepAlives sync.Map
 
+var (
+	cachedSrflx     *Endpoint
+	cachedSrflxLock sync.Mutex
+	stunMu          sync.Mutex
+	stunRunning     bool
+)
+
 type Endpoint struct {
 	IP       string `json:"ip"`
 	Port     int    `json:"port"`
@@ -230,6 +237,8 @@ func main() {
 
 	go bind.RunControlLoop()
 
+	trickleSTUN(bind, &http.Client{Timeout: 10 * time.Second}, serverURL, pubKey.String(), authToken)
+
 	go runServerPollingLoop(bind, serverURL, pubKey.String(), authToken, stopChan)
 
 	// BUG FIX: HealthMonitor must start before the blocking shutdown wait,
@@ -261,10 +270,9 @@ func runServerPollingLoop(bind *vpn.HybridBind, serverURL, publicKey, authToken 
 }
 
 func performPollCycle(bind *vpn.HybridBind, client *http.Client, serverURL, publicKey, authToken string) {
-	// 1. Sync state with server
-	mypublicEp, _ := performSTUN(bind, "stun.l.google.com:19302")
 	localEps, _ := getLocalIPs()
-	updateHeartbeat(client, serverURL, publicKey, authToken, mypublicEp, localEps)
+	updateHeartbeat(client, serverURL, publicKey, authToken, getCachedSrflx(), localEps)
+	trickleSTUN(bind, client, serverURL, publicKey, authToken)
 
 	pollResp, err := pollServer(client, serverURL, authToken, publicKey)
 	if err != nil || pollResp == nil {
@@ -337,30 +345,28 @@ func performPollCycle(bind *vpn.HybridBind, client *http.Client, serverURL, publ
 		ipcBuilder.WriteString("allowed_ip=" + cleanIP + "/32\n")
 		ipcBuilder.WriteString("persistent_keepalive_interval=25\n")
 
-		if found {
-			if bind.IsUdpDead() {
-				ipcBuilder.WriteString(fmt.Sprintf("endpoint=%s\n", hexPeerKey))
-				log.Printf("🔹 PEER CONNECT (RELAY FALLBACK): %s -> %s (%s/32)", peer.PublicKey[:8], hexPeerKey, cleanIP)
-			} else {
-				ipcBuilder.WriteString(fmt.Sprintf("endpoint=%s:%d\n", bestEndpoint.IP, bestEndpoint.Port))
-				log.Printf("🔹 PEER CONNECT: %s -> %s (%s/32)", peer.PublicKey[:8], bestEndpoint.IP, cleanIP)
-			}
-			endpointCache.Store(hexPeerKey, fmt.Sprintf("%s:%d", bestEndpoint.IP, bestEndpoint.Port))
+		var finalEndpointStr string
+		if cachedEp, ok := endpointCache.Load(hexPeerKey); ok && cachedEp.(string) != "" {
+			finalEndpointStr = cachedEp.(string)
+		} else if found {
+			finalEndpointStr = fmt.Sprintf("%s:%d", bestEndpoint.IP, bestEndpoint.Port)
+			endpointCache.Store(hexPeerKey, finalEndpointStr)
+		}
 
-			// BUG FIX: bind.StartKeepAlives was never called anywhere in
-			// this file. StartHolePunching only fires a one-shot 5-packet
-			// burst (~750ms) once per 30s poll cycle - not a sustained
-			// keepalive. Without a continuous 5s-interval prober, the
-			// custom ping-pong liveness/roaming mechanism (lastPongTime,
-			// udpFailCount) never gets fed real traffic once the initial
-			// hole-punch burst ends, so it silently stalls - especially
-			// visible when hosting remotely across real NATs, since
-			// LAN/localhost testing doesn't need the mapping kept alive.
-			if udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", bestEndpoint.IP, bestEndpoint.Port)); err == nil {
+		if finalEndpointStr != "" {
+			if bind.IsPeerUdpDead(hexPeerKey) {
+				ipcBuilder.WriteString(fmt.Sprintf("endpoint=%s\n", hexPeerKey))
+				log.Printf("🔹 PEER CONNECT (RELAY): %s -> %s", peer.PublicKey[:8], hexPeerKey)
+			} else {
+				ipcBuilder.WriteString(fmt.Sprintf("endpoint=%s\n", finalEndpointStr))
+				log.Printf("🔹 PEER CONNECT (UDP): %s -> %s", peer.PublicKey[:8], finalEndpointStr)
+			}
+
+			if udpAddr, err := net.ResolveUDPAddr("udp", finalEndpointStr); err == nil {
 				if _, alreadyRunning := activeKeepAlives.LoadOrStore(hexPeerKey, true); !alreadyRunning {
 					ctx, cancel := context.WithCancel(context.Background())
 					activeKeepAlives.Store(hexPeerKey, cancel)
-					go bind.StartKeepAlives(ctx, udpAddr)
+					go bind.StartKeepAlives(ctx, hexPeerKey, udpAddr)
 				}
 			} else {
 				log.Printf("could not resolve endpoint for keepalive, peer %s: %v", peer.PublicKey[:8], err)
@@ -460,6 +466,48 @@ func waitForShutdown(stopChan chan struct{}, bind *vpn.HybridBind) {
 
 	// 3. Optional: small delay to let goroutines print their "stopping" logs
 	time.Sleep(500 * time.Millisecond)
+}
+
+func getCachedSrflx() *Endpoint {
+	cachedSrflxLock.Lock()
+	defer cachedSrflxLock.Unlock()
+	return cachedSrflx
+}
+
+func setCachedSrflx(ep *Endpoint) {
+	cachedSrflxLock.Lock()
+	defer cachedSrflxLock.Unlock()
+	cachedSrflx = ep
+}
+
+func trickleSTUN(bind *vpn.HybridBind, client *http.Client, serverURL, publicKey, authToken string) {
+	stunMu.Lock()
+	if stunRunning {
+		stunMu.Unlock()
+		return
+	}
+	stunRunning = true
+	stunMu.Unlock()
+
+	go func() {
+		defer func() {
+			stunMu.Lock()
+			stunRunning = false
+			stunMu.Unlock()
+		}()
+
+		srflxEp, err := performSTUN(bind, "stun.l.google.com:19302")
+		if err != nil || srflxEp == nil {
+			return
+		}
+		setCachedSrflx(srflxEp)
+		localEps, _ := getLocalIPs()
+		if err := updateHeartbeat(client, serverURL, publicKey, authToken, srflxEp, localEps); err != nil {
+			log.Printf("Trickle ICE: heartbeat failed: %v", err)
+			return
+		}
+		log.Printf("Trickle ICE: STUN public candidate (%s:%d) sent to server", srflxEp.IP, srflxEp.Port)
+	}()
 }
 
 func performSTUN(bind *vpn.HybridBind, stunServer string) (*Endpoint, error) {
@@ -622,6 +670,7 @@ func StartHolePunching(bind *vpn.HybridBind, peerKey string, endpoints []Endpoin
 
 func getLocalIPs() ([]Endpoint, error) {
 	var endpoints []Endpoint
+	_, cgnatPrefix, _ := net.ParseCIDR("100.64.0.0/10")
 	ifaces, _ := net.Interfaces()
 	for _, i := range ifaces {
 		addrs, _ := i.Addrs()
@@ -643,6 +692,11 @@ func getLocalIPs() ([]Endpoint, error) {
 			}
 
 			if isLoopback {
+				continue
+			}
+
+			if cgnatPrefix.Contains(ip) {
+				log.Printf("Skipping VPN overlay IP: %s", ip.String())
 				continue
 			}
 
@@ -728,7 +782,25 @@ func HealthMonitor(b *vpn.HybridBind, stopChan chan struct{}) {
 				}
 			} else if !isDead && usingRelay {
 				log.Printf("udp recovered, switching back to direct connection")
-				usingRelay = false
+				var ipcBuilder strings.Builder
+				endpointCache.Range(func(key, value interface{}) bool {
+					peerHexKey := key.(string)
+					udpEndpoint := value.(string)
+					ipcBuilder.WriteString(fmt.Sprintf("public_key=%s\n", peerHexKey))
+					ipcBuilder.WriteString(fmt.Sprintf("endpoint=%s\n", udpEndpoint))
+					return true
+				})
+
+				if ipcBuilder.Len() > 0 {
+					if err := WgDevice.IpcSet(ipcBuilder.String()); err != nil {
+						log.Printf("failed to switch back to direct: %v", err)
+					} else {
+						usingRelay = false
+						log.Println("switched back to direct UDP connection")
+					}
+				} else {
+					usingRelay = false
+				}
 			}
 		case <-stopChan:
 			log.Println("stopping the health monitor")

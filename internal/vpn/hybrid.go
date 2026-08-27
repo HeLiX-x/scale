@@ -25,17 +25,18 @@ type HybridBind struct {
 	udpConn      *net.UDPConn
 	wsConn       *websocket.Conn
 	wsLock       sync.Mutex
-	rxChan       chan Packet
-	ControlChan  chan Packet
-	StunRxChan   chan Packet
-	udpFailCount int
-	failLock     sync.Mutex
-	IpMap        map[string]*net.UDPAddr
-	mapLock      sync.Mutex
-	lastPongTime time.Time
-	pongLock     sync.Mutex
-	myPubKey     [32]byte
-	rxDropCount  int64
+	rxChan        chan Packet
+	ControlChan   chan Packet
+	StunRxChan    chan Packet
+	failCounts    map[string]int
+	successCounts map[string]int
+	failLock      sync.Mutex
+	IpMap         map[string]*net.UDPAddr
+	mapLock       sync.Mutex
+	lastPongs     map[string]time.Time
+	pongLock      sync.Mutex
+	myPubKey      [32]byte
+	rxDropCount   int64
 
 	closeChan chan struct{}
 	isClosed  bool
@@ -51,11 +52,14 @@ type Packet struct {
 
 func NewHybridBind(listenPort int, relayURL string, myPubKey string) (*HybridBind, error) {
 	b := &HybridBind{
-		rxChan:      make(chan Packet, 1024),
-		ControlChan: make(chan Packet, 1024),
-		StunRxChan:  make(chan Packet, 1024),
-		IpMap:       make(map[string]*net.UDPAddr),
-		closeChan:   make(chan struct{}),
+		rxChan:        make(chan Packet, 1024),
+		ControlChan:   make(chan Packet, 1024),
+		StunRxChan:    make(chan Packet, 1024),
+		IpMap:         make(map[string]*net.UDPAddr),
+		failCounts:    make(map[string]int),
+		successCounts: make(map[string]int),
+		lastPongs:     make(map[string]time.Time),
+		closeChan:     make(chan struct{}),
 	}
 
 	// 1. Setup UDP
@@ -114,11 +118,21 @@ func (b *HybridBind) RunControlLoop() {
 		}
 
 		b.pongLock.Lock()
-		b.lastPongTime = time.Now()
+		b.lastPongs[peerKey] = time.Now()
 		b.pongLock.Unlock()
 
 		b.failLock.Lock()
-		b.udpFailCount = 0
+		if b.failCounts[peerKey] >= threshold {
+			b.successCounts[peerKey]++
+			if b.successCounts[peerKey] >= 3 {
+				b.failCounts[peerKey] = 0
+				b.successCounts[peerKey] = 0
+				fmt.Printf("Peer %s: 3 consecutive pongs received, direct UDP path recovered\n", peerKey[:8])
+			}
+		} else {
+			b.failCounts[peerKey] = 0
+			b.successCounts[peerKey] = 0
+		}
 		b.failLock.Unlock()
 
 		newAddress := pkt.Endpoint.(*UDPEndpoint).Addr
@@ -218,14 +232,14 @@ func (b *HybridBind) Send(packets [][]byte, ep conn.Endpoint) error {
 			}
 		}
 		if len(errs) > 0 {
-			b.failLock.Lock()
-			b.udpFailCount += len(errs)
-			b.failLock.Unlock()
+			if peerKey := b.peerKeyForAddr(udpEp.Addr); peerKey != "" {
+				b.failLock.Lock()
+				b.failCounts[peerKey] += len(errs)
+				b.successCounts[peerKey] = 0
+				b.failLock.Unlock()
+			}
 			return fmt.Errorf("udp send had %d faliures : %v", len(errs), errs[0])
 		}
-		b.failLock.Lock()
-		b.udpFailCount = 0
-		b.failLock.Unlock()
 		return nil
 	}
 	if relayEp, ok := ep.(*RelayEndpoint); ok {
@@ -365,13 +379,39 @@ func VerifyProbe(pkt []byte) (string, bool) {
 
 const threshold = 5
 
+func (b *HybridBind) peerKeyForAddr(addr *net.UDPAddr) string {
+	if addr == nil {
+		return ""
+	}
+	want := addr.String()
+	b.mapLock.Lock()
+	defer b.mapLock.Unlock()
+	for k, v := range b.IpMap {
+		if v != nil && v.String() == want {
+			return k
+		}
+	}
+	return ""
+}
+
 func (b *HybridBind) IsUdpDead() bool {
 	b.failLock.Lock()
 	defer b.failLock.Unlock()
-	return b.udpFailCount >= threshold
+	for _, c := range b.failCounts {
+		if c >= threshold {
+			return true
+		}
+	}
+	return false
 }
 
-func (b *HybridBind) StartKeepAlives(ctx context.Context, peerAddr *net.UDPAddr) {
+func (b *HybridBind) IsPeerUdpDead(peerKeyHex string) bool {
+	b.failLock.Lock()
+	defer b.failLock.Unlock()
+	return b.failCounts[peerKeyHex] >= threshold
+}
+
+func (b *HybridBind) StartKeepAlives(ctx context.Context, peerKeyHex string, initialAddr *net.UDPAddr) {
 	ticker := time.NewTicker(time.Second * 5)
 	defer ticker.Stop()
 
@@ -380,7 +420,7 @@ func (b *HybridBind) StartKeepAlives(ctx context.Context, peerAddr *net.UDPAddr)
 	copy(probePkt[4:], b.myPubKey[:])
 
 	b.pongLock.Lock()
-	b.lastPongTime = time.Now()
+	b.lastPongs[peerKeyHex] = time.Now()
 	b.pongLock.Unlock()
 
 	for {
@@ -388,23 +428,37 @@ func (b *HybridBind) StartKeepAlives(ctx context.Context, peerAddr *net.UDPAddr)
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			err := b.SendRaw(probePkt, peerAddr)
+			b.mapLock.Lock()
+			currentAddr, ok := b.IpMap[peerKeyHex]
+			b.mapLock.Unlock()
+			if !ok || currentAddr == nil {
+				currentAddr = initialAddr
+			}
+			if currentAddr == nil {
+				continue
+			}
+
+			err := b.SendRaw(probePkt, currentAddr)
 			if err != nil {
-				fmt.Printf("failed to send keepalives to %s : %v\n", peerAddr.String(), err)
+				fmt.Printf("failed to send keepalives to %s : %v\n", currentAddr.String(), err)
 				continue
 			}
 
 			b.pongLock.Lock()
-			lastPong := b.lastPongTime
+			lastPong := b.lastPongs[peerKeyHex]
 			b.pongLock.Unlock()
 
 			if !lastPong.IsZero() && time.Since(lastPong) > 15*time.Second {
-				fmt.Printf("udp peer is dead , lastpongtime > threshold , endpoint : %s", peerAddr.String())
+				shortKey := peerKeyHex
+				if len(shortKey) > 8 {
+					shortKey = shortKey[:8]
+				}
+				fmt.Printf("udp peer %s is dead (last pong > 15s, endpoint: %s)\n", shortKey, currentAddr.String())
 				b.failLock.Lock()
-				b.udpFailCount = 5
+				b.failCounts[peerKeyHex] = 5
+				b.successCounts[peerKeyHex] = 0
 				b.failLock.Unlock()
 			}
 		}
 	}
-
 }
