@@ -15,7 +15,10 @@ var Ctx = context.Background()
 func ConnectRedis() {
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
-		redisAddr = "localhost:6379"
+		redisAddr = "127.0.0.1:6379"
+	}
+	if err := requireLoopbackAddr(redisAddr, "REDIS_ADDR"); err != nil {
+		log.Fatalf("Refusing to start: Redis must listen on 127.0.0.1 only: %v", err)
 	}
 
 	redisPassword := os.Getenv("REDIS_PASSWORD")

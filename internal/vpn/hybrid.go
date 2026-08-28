@@ -22,9 +22,9 @@ const MagicProbeSig uint32 = 0xFF505242
 
 // HybridBind handles BOTH UDP (P2P) and WebSocket (Relay)
 type HybridBind struct {
-	udpConn      *net.UDPConn
-	wsConn       *websocket.Conn
-	wsLock       sync.Mutex
+	udpConn       *net.UDPConn
+	wsConn        *websocket.Conn
+	wsLock        sync.Mutex
 	rxChan        chan Packet
 	ControlChan   chan Packet
 	StunRxChan    chan Packet
@@ -86,7 +86,7 @@ func NewHybridBind(listenPort int, relayURL string, myPubKey string) (*HybridBin
 
 	// 2. Setup WebSocket
 	dialer := *websocket.DefaultDialer
-	dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: false}
 	ws, _, err := dialer.Dial(relayURL, nil)
 	if err == nil {
 		b.wsConn = ws
@@ -101,60 +101,65 @@ func NewHybridBind(listenPort int, relayURL string, myPubKey string) (*HybridBin
 }
 
 func (b *HybridBind) RunControlLoop() {
-
-	for pkt := range b.ControlChan {
-
-		if VerifyStun(pkt.Data) {
-			select {
-			case b.StunRxChan <- pkt:
-
-			default:
+	for {
+		select {
+		case <-b.closeChan:
+			return
+		case pkt, ok := <-b.ControlChan:
+			if !ok {
+				return
 			}
-			continue
-		}
-		peerKey, valid := VerifyProbe(pkt.Data)
-		if !valid {
-			continue
-		}
 
-		b.pongLock.Lock()
-		b.lastPongs[peerKey] = time.Now()
-		b.pongLock.Unlock()
+			if VerifyStun(pkt.Data) {
+				select {
+				case b.StunRxChan <- pkt:
 
-		b.failLock.Lock()
-		if b.failCounts[peerKey] >= threshold {
-			b.successCounts[peerKey]++
-			if b.successCounts[peerKey] >= 3 {
+				default:
+				}
+				continue
+			}
+			peerKey, valid := VerifyProbe(pkt.Data)
+			if !valid {
+				continue
+			}
+
+			b.pongLock.Lock()
+			b.lastPongs[peerKey] = time.Now()
+			b.pongLock.Unlock()
+
+			b.failLock.Lock()
+			if b.failCounts[peerKey] >= threshold {
+				b.successCounts[peerKey]++
+				if b.successCounts[peerKey] >= 3 {
+					b.failCounts[peerKey] = 0
+					b.successCounts[peerKey] = 0
+					fmt.Printf("Peer %s: 3 consecutive pongs received, direct UDP path recovered\n", peerKey[:8])
+				}
+			} else {
 				b.failCounts[peerKey] = 0
 				b.successCounts[peerKey] = 0
-				fmt.Printf("Peer %s: 3 consecutive pongs received, direct UDP path recovered\n", peerKey[:8])
 			}
-		} else {
-			b.failCounts[peerKey] = 0
-			b.successCounts[peerKey] = 0
+			b.failLock.Unlock()
+
+			newAddress := pkt.Endpoint.(*UDPEndpoint).Addr
+
+			addressChanged := false
+
+			b.mapLock.Lock()
+			oldAddress := b.IpMap[peerKey]
+
+			if oldAddress == nil || oldAddress.String() != newAddress.String() {
+				b.IpMap[peerKey] = newAddress
+				addressChanged = true
+			}
+			b.mapLock.Unlock()
+
+			if valid && b.UpdatePeerEndpoint != nil && addressChanged {
+				fmt.Printf("peer %s is roaming on new address: %s/n", peerKey, newAddress.String())
+				b.UpdatePeerEndpoint(peerKey, newAddress)
+			}
 		}
-		b.failLock.Unlock()
-
-		newAddress := pkt.Endpoint.(*UDPEndpoint).Addr
-
-		addressChanged := false
-
-		b.mapLock.Lock()
-		oldAddress := b.IpMap[peerKey]
-
-		if oldAddress == nil || oldAddress.String() != newAddress.String() {
-			b.IpMap[peerKey] = newAddress
-			addressChanged = true
-		}
-		b.mapLock.Unlock()
-
-		if valid && b.UpdatePeerEndpoint != nil && addressChanged {
-			fmt.Printf("peer %s is roaming on new address: %s/n", peerKey, newAddress.String())
-			b.UpdatePeerEndpoint(peerKey, newAddress)
-		}
-
 	}
-
 }
 
 func (b *HybridBind) readUDP() {
@@ -282,7 +287,7 @@ func (b *HybridBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	b.mu.Unlock()
 	return []conn.ReceiveFunc{b.Receive}, uint16(b.udpConn.LocalAddr().(*net.UDPAddr).Port), nil
 }
-func (b *HybridBind) BatchSize() int       { return 1 }
+func (b *HybridBind) BatchSize() int { return 1 }
 func (b *HybridBind) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -409,6 +414,28 @@ func (b *HybridBind) IsPeerUdpDead(peerKeyHex string) bool {
 	b.failLock.Lock()
 	defer b.failLock.Unlock()
 	return b.failCounts[peerKeyHex] >= threshold
+}
+
+func (b *HybridBind) RelayConnected() bool {
+	b.wsLock.Lock()
+	defer b.wsLock.Unlock()
+	return b.wsConn != nil
+}
+
+func (b *HybridBind) LastPong(peerKeyHex string) time.Time {
+	b.pongLock.Lock()
+	defer b.pongLock.Unlock()
+	return b.lastPongs[peerKeyHex]
+}
+
+func (b *HybridBind) SnapshotPongs() map[string]time.Time {
+	b.pongLock.Lock()
+	defer b.pongLock.Unlock()
+	out := make(map[string]time.Time, len(b.lastPongs))
+	for k, v := range b.lastPongs {
+		out[k] = v
+	}
+	return out
 }
 
 func (b *HybridBind) StartKeepAlives(ctx context.Context, peerKeyHex string, initialAddr *net.UDPAddr) {

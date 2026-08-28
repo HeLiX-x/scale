@@ -24,6 +24,9 @@ func Connect() {
 	if dsn == "" {
 		log.Fatal("DATABASE_URL environment variable is not set")
 	}
+	if err := requireLoopbackAddr(dsn, "DATABASE_URL"); err != nil {
+		log.Fatalf("Refusing to start: PostgreSQL must listen on 127.0.0.1 only: %v", err)
+	}
 
 	var err error
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})

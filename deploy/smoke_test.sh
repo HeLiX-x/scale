@@ -76,7 +76,8 @@ fi
 
 echo -e "\n5. Polling Devices (/api/poll)..."
 HTTP_CODE=$(curl -s -o /tmp/resp.json -w "%{http_code}" -X GET "$API_URL/poll" \
-  -H "Authorization: Bearer $JWT")
+  -H "Authorization: Bearer $JWT" \
+  -H "X-Device-Public-Key: $PUB_KEY")
 
 cat /tmp/resp.json | jq .
 if [ "$HTTP_CODE" != "200" ]; then

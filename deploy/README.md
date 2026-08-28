@@ -17,14 +17,16 @@ SSH into the instance using your `.pem` key:
 ssh -i /path/to/your-key.pem ubuntu@<elastic-ip>
 ```
 
-Install dependencies and set up `ufw` (defense-in-depth):
+Install dependencies, bind PostgreSQL/Redis to localhost, and lock the host firewall:
+
 ```bash
 sudo apt update && sudo apt install -y postgresql redis-server ufw
-sudo ufw allow 22/tcp
-sudo ufw allow 8080/tcp
-sudo ufw allow 8443/tcp
-sudo ufw enable
+sudo ./deploy/bind_localhost.sh
+sudo ./deploy/setup_firewall.sh
 ```
+
+Public ports: `8080/tcp` (API), `8443/tcp` (relay), `51820/udp` (WireGuard), plus `22/tcp` for SSH.  
+`5432` (PostgreSQL) and `6379` (Redis) are bound to `127.0.0.1` and denied from the WAN.
 
 **3. Copy Files to EC2**
 From your local machine, build and `scp` the files over:

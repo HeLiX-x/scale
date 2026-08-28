@@ -14,13 +14,8 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// TODO: Replace hardcoded IPAM with persistent, concurrent-safe allocation (e.g., PostgreSQL)
-// TODO: Sign configs with server key; clients should verify signatures
-// The Redis key for the cached device list
-
 const allDevicesCacheKey = "cache:all_devices"
 
-// How often to update the cache from PostgreSQL
 const deviceCacheUpdateInterval = 10 * time.Second
 
 func main() {
@@ -28,18 +23,14 @@ func main() {
 		log.Println("No .env file found, using environment variables")
 	}
 
-	// Initialize the database connection on startup.
 	database.Connect()
 
 	database.ConnectRedis()
 
 	controllers.InitIPAllocator()
 
-	// Populate cache synchronously before accepting traffic.
-	// This ensures /api/poll never 500s due to a missing cache key on startup.
 	refreshDeviceCache()
 
-	// Start the background refresh loop for periodic cache updates.
 	go func() {
 		ticker := time.NewTicker(deviceCacheUpdateInterval)
 		defer ticker.Stop()
@@ -62,7 +53,6 @@ func main() {
 
 	stunController := controllers.NewStunController(jwtSecret)
 
-	// Setup the routes, passing both secrets
 	routes.SetupRoutes(app, jwtSecret, deviceSecret, stunController)
 
 	port := os.Getenv("PORT")
@@ -71,8 +61,7 @@ func main() {
 	}
 
 	log.Printf("Starting server on port %s...", port)
-	// Use the port variable in your Listen call
-	if err := app.Listen(":" + port); err != nil {
+	if err := app.ListenTLS(":"+port, "cert.pem", "key.pem"); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }

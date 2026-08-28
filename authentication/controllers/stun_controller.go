@@ -9,6 +9,7 @@ import (
 	"scale/database"
 	"scale/models"
 	"scale/pkg/types"
+	"strconv"
 	"sync"
 	"time"
 
@@ -35,6 +36,25 @@ func (s *StunController) Poll(c *fiber.Ctx) error {
 	if !ok {
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Could not get user ID from token"})
 	}
+	userID_64, err := strconv.ParseUint(userIDStr, 10, 32)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Invalid user ID format in token"})
+	}
+	userID := uint(userID_64)
+
+	clientPubKey := c.Get("X-Device-Public-Key")
+	if clientPubKey == "" {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "Missing X-Device-Public-Key header"})
+	}
+
+	// Verify the device is registered and belongs to the authenticated user
+	ownerDevice, err := database.FindDeviceByPublicKey(clientPubKey)
+	if err != nil {
+		return c.Status(http.StatusForbidden).JSON(fiber.Map{"error": "Device not registered"})
+	}
+	if ownerDevice.UserID != userID {
+		return c.Status(http.StatusForbidden).JSON(fiber.Map{"error": "Device does not belong to authenticated user"})
+	}
 
 	stunToken, err := s.generateStunToken(userIDStr)
 	if err != nil {
@@ -58,8 +78,6 @@ func (s *StunController) Poll(c *fiber.Ctx) error {
 			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to parse peer list"})
 		}
 	}
-
-	clientPubKey := c.Get("X-Device-Public-Key")
 
 	// Convert database models to the PeerInfo type for the response
 	peers := make([]types.PeerInfo, 0, len(allDevices))

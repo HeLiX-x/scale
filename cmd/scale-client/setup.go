@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -82,7 +83,48 @@ type RegistrationConfig struct {
 
 var listenPort = 51820
 
-func main() {
+var (
+	vpnCtx      context.Context
+	vpnCancel   context.CancelFunc
+	snapshotMu  sync.RWMutex
+	snapshot    RuntimeSnapshot
+	lastPeers   []PeerInfo
+	usingRelay  atomic.Bool
+	controlOK   atomic.Bool
+	overlayIP   string
+	pubKeyStr   string
+	controlURL  string
+	relayURLStr string
+	ifaceName   string
+)
+
+func cmdUp(_ []string) error {
+	if err := requireRoot("up"); err != nil {
+		return err
+	}
+	if pid, ok := runningPID(); ok {
+		return fmt.Errorf("Scale VPN is already running (pid %d)", pid)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	vpnCtx = ctx
+	vpnCancel = cancel
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	return runVPN(ctx)
+}
+
+func runVPN(ctx context.Context) error {
 	if err := godotenv.Load(".env"); err != nil {
 		log.Println("No .env file found, using environment variables.")
 	}
@@ -92,73 +134,62 @@ func main() {
 		log.Printf("Error getting IPs: %v", err)
 	}
 
-	wgIface := os.Getenv("WG_INTERFACE")
-	if wgIface == "" {
-		wgIface = "wg0"
-	}
+	cfg := loadConfig()
+	wgIface := firstNonEmpty(os.Getenv("WG_INTERFACE"), cfg.Interface, "wg0")
+	ifaceName = wgIface
 
 	if envPort := os.Getenv("WG_PORT"); envPort != "" {
-		// Simple string to int conversion
 		var err error
-		listenPort, err = strconv.Atoi(envPort) // Requires "strconv" import!
+		listenPort, err = strconv.Atoi(envPort)
 		if err != nil {
-			log.Fatalf("Invalid WG_PORT: %v", err)
+			return fmt.Errorf("invalid WG_PORT: %w", err)
 		}
+	} else if cfg.Port > 0 {
+		listenPort = cfg.Port
 	}
 	log.Printf("Starting WireGuard on %s : %d", wgIface, listenPort)
 
-	serverURL := strings.TrimSuffix(strings.TrimSpace(os.Getenv("WG_CONTROL_SERVER")), "/")
-	authToken := strings.TrimSpace(os.Getenv("AUTH_TOKEN"))
-	relayURL := strings.TrimSpace(os.Getenv("RELAY_URL"))
+	serverURL := strings.TrimSuffix(firstNonEmpty(os.Getenv("WG_CONTROL_SERVER"), cfg.ControlServer), "/")
+	authToken := firstNonEmpty(readToken(), strings.TrimSpace(os.Getenv("AUTH_TOKEN")))
+	relayURL := firstNonEmpty(os.Getenv("RELAY_URL"), cfg.RelayURL)
+	controlURL = serverURL
+	relayURLStr = relayURL
 
 	if authToken == "" {
-		log.Printf("error empty auth token")
-		email := os.Getenv("SCALE_EMAIL")
-		password := os.Getenv("SCALE_PASSWORD")
-
-		if email == "" || password == "" {
-			log.Fatal("Missing credentials: Set AUTH_TOKEN or (SCALE_EMAIL + SCALE_PASSWORD)")
-		}
-
-		// We need the helper function 'loginToServer' defined at the bottom of the file
-		var err error
-		authToken, err = loginToServer(serverURL, email, password)
-		if err != nil {
-			log.Fatalf("Auto-login failed: %v", err)
-		}
-		log.Println("Auto-login successful! Token acquired.")
+		return fmt.Errorf("Please run 'scale login' first")
 	}
-
-	if serverURL == "" || authToken == "" || relayURL == "" {
-		log.Fatal("WG_CONTROL_SERVER, AUTH_TOKEN, and RELAY_URL must be set.")
+	if serverURL == "" || relayURL == "" {
+		return fmt.Errorf("control server and relay URL must be set (run 'scale login --server ... --relay ...')")
 	}
 
 	privKey, pubKey, err := generateOrLoadKeys()
 	if err != nil {
-		log.Fatalf("Key setup failed: %v", err)
+		return fmt.Errorf("key setup failed: %w", err)
 	}
+	pubKeyStr = pubKey.String()
 
 	log.Println("Registering with control server...")
 	regConfig, err := registerDeviceAndGetIP(serverURL, pubKey.String(), authToken)
 	if err != nil {
-		log.Fatalf("Failed to register device: %v", err)
+		return fmt.Errorf("failed to register device: %w", err)
 	}
 	log.Printf("Successfully registered. Assigned IP: %s", regConfig.AssignedIP)
-
-	//	if err := ForceConfigureInterface(wgIface, regConfig.AssignedIP); err != nil {
-	//		log.Printf("Warning: Manual IP setup failed: %v", err)
-	//	}
+	overlayIP = regConfig.AssignedIP
 
 	log.Println("⚡ Starting Userspace WireGuard Engine (Hybrid Mode)...")
 
 	tunDev, err := tun.CreateTUN(wgIface, 1420)
 	if err != nil {
-		log.Fatalf("Failed to create TUN device: %v", err)
+		_ = exec.Command("ip", "link", "delete", wgIface).Run()
+		tunDev, err = tun.CreateTUN(wgIface, 1420)
+		if err != nil {
+			return fmt.Errorf("failed to create TUN device: %w", err)
+		}
 	}
 
 	bind, err := vpn.NewHybridBind(listenPort, relayURL, hexKey(pubKey))
 	if err != nil {
-		log.Fatalf("Failed to create HybridBind: %v", err)
+		return fmt.Errorf("failed to create HybridBind: %w", err)
 	}
 
 	bind.UpdatePeerEndpoint = func(peerKey string, newAddr *net.UDPAddr) {
@@ -171,8 +202,8 @@ func main() {
 		endpointCache.Store(peerKey, newAddr.String())
 
 		go func() {
-			cfg := fmt.Sprintf("public_key=%s\nendpoint=%s\n", peerKey, newAddr.String())
-			if err := WgDevice.IpcSet(cfg); err != nil {
+			ipcCfg := fmt.Sprintf("public_key=%s\nendpoint=%s\n", peerKey, newAddr.String())
+			if err := WgDevice.IpcSet(ipcCfg); err != nil {
 				endpointCache.Delete(peerKey)
 			} else {
 				log.Printf("Smart Trust: Peer %s moved to %s", peerKey[:8], newAddr.String())
@@ -193,7 +224,6 @@ func main() {
 
 	log.Println("Applying WireGuard configuration (private key only)...")
 
-	// Create a channel to catch the result
 	done := make(chan error, 1)
 	go func() {
 		done <- WgDevice.IpcSet(conf)
@@ -202,56 +232,51 @@ func main() {
 	select {
 	case err := <-done:
 		if err != nil {
-			log.Fatalf("IpcSet failed: %v", err)
+			teardownVPN(bind, wgIface)
+			return fmt.Errorf("IpcSet failed: %w", err)
 		}
 		log.Println("applied successfully.")
 	case <-time.After(5 * time.Second):
-		log.Fatal("FATAL: IpcSet timed out ,check hybridbind implementation")
+		teardownVPN(bind, wgIface)
+		return fmt.Errorf("IpcSet timed out, check hybridbind implementation")
 	}
 
-	//if err := WgDevice.IpcSet(conf); err != nil {
-	//	log.Fatalf("Failed to configure device: %v", err)
-	//}
-
-
-	/*
-		uapi, err := ipc.UAPIListen(wgIface, nil)
-		if err != nil {
-			log.Printf("Failed to listen on UAPI socket: %v", err)
-		} else {
-			go func() {
-				for {
-					conn, err := uapi.Accept()
-					if err != nil {
-						continue
-					}
-					go WgDevice.IpcHandle(conn)
-				}
-			}()
-		}
-	*/
-
-	stopChan := make(chan struct{})
+	if err := writePID(); err != nil {
+		log.Printf("Warning: failed to write pid file: %v", err)
+	}
+	if err := startIPC(vpnCancel); err != nil {
+		log.Printf("Warning: status socket unavailable: %v", err)
+	}
+	publishSnapshot(bind)
 
 	log.Println("Client running. Starting polling loop...")
 
-	go bind.RunControlLoop()
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		bind.RunControlLoop()
+	}()
+	go func() {
+		defer wg.Done()
+		runServerPollingLoop(ctx, bind, serverURL, pubKey.String(), authToken)
+	}()
+	go func() {
+		defer wg.Done()
+		HealthMonitor(ctx, bind)
+	}()
 
 	trickleSTUN(bind, &http.Client{Timeout: 10 * time.Second}, serverURL, pubKey.String(), authToken)
 
-	go runServerPollingLoop(bind, serverURL, pubKey.String(), authToken, stopChan)
-
-	// BUG FIX: HealthMonitor must start before the blocking shutdown wait,
-	// not after. waitForShutdown blocks until SIGINT/SIGTERM, so starting
-	// HealthMonitor after it meant the UDP-dead-detection/relay-failover
-	// loop never ran during normal operation - only at the exact moment
-	// the process was already exiting.
-	go HealthMonitor(bind, stopChan)
-
-	waitForShutdown(stopChan, bind)
+	<-ctx.Done()
+	log.Println("Shutdown signal received.")
+	teardownVPN(bind, wgIface)
+	wg.Wait()
+	fmt.Println("Scale VPN disconnected. Network interface wg0 removed.")
+	return nil
 }
 
-func runServerPollingLoop(bind *vpn.HybridBind, serverURL, publicKey, authToken string, stop chan struct{}) {
+func runServerPollingLoop(ctx context.Context, bind *vpn.HybridBind, serverURL, publicKey, authToken string) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	httpClient := &http.Client{Timeout: 10 * time.Second}
@@ -262,7 +287,7 @@ func runServerPollingLoop(bind *vpn.HybridBind, serverURL, publicKey, authToken 
 		select {
 		case <-ticker.C:
 			performPollCycle(bind, httpClient, serverURL, publicKey, authToken)
-		case <-stop:
+		case <-ctx.Done():
 			log.Println("Gracefully stopping polling loop...")
 			return
 		}
@@ -276,8 +301,14 @@ func performPollCycle(bind *vpn.HybridBind, client *http.Client, serverURL, publ
 
 	pollResp, err := pollServer(client, serverURL, authToken, publicKey)
 	if err != nil || pollResp == nil {
+		controlOK.Store(false)
+		publishSnapshot(bind)
 		return
 	}
+	controlOK.Store(true)
+	snapshotMu.Lock()
+	lastPeers = pollResp.Peers
+	snapshotMu.Unlock()
 
 	// Convert YOUR key once
 	selfKeyBytes, _ := wgtypes.ParseKey(publicKey)
@@ -286,6 +317,7 @@ func performPollCycle(bind *vpn.HybridBind, client *http.Client, serverURL, publ
 	var ipcBuilder strings.Builder
 	// MANDATORY: Clear old state and start fresh
 	ipcBuilder.WriteString("replace_peers=true\n")
+	seenPeers := make(map[string]bool)
 
 	for _, peer := range pollResp.Peers {
 		if peer.PublicKey == publicKey {
@@ -299,6 +331,7 @@ func performPollCycle(bind *vpn.HybridBind, client *http.Client, serverURL, publ
 			continue
 		}
 		hexPeerKey := hex.EncodeToString(peerKeyBytes[:])
+		seenPeers[hexPeerKey] = true
 
 		// 3. IP VALIDATION (The actual fix for Error -22)
 		// Strip any existing mask from peer.ID (e.g., "100.64.0.7/24" -> "100.64.0.7")
@@ -363,10 +396,15 @@ func performPollCycle(bind *vpn.HybridBind, client *http.Client, serverURL, publ
 			}
 
 			if udpAddr, err := net.ResolveUDPAddr("udp", finalEndpointStr); err == nil {
-				if _, alreadyRunning := activeKeepAlives.LoadOrStore(hexPeerKey, true); !alreadyRunning {
-					ctx, cancel := context.WithCancel(context.Background())
-					activeKeepAlives.Store(hexPeerKey, cancel)
-					go bind.StartKeepAlives(ctx, hexPeerKey, udpAddr)
+				parent := vpnCtx
+				if parent == nil {
+					parent = context.Background()
+				}
+				child, cancel := context.WithCancel(parent)
+				if _, alreadyRunning := activeKeepAlives.LoadOrStore(hexPeerKey, cancel); alreadyRunning {
+					cancel()
+				} else {
+					go bind.StartKeepAlives(child, hexPeerKey, udpAddr)
 				}
 			} else {
 				log.Printf("could not resolve endpoint for keepalive, peer %s: %v", peer.PublicKey[:8], err)
@@ -377,6 +415,17 @@ func performPollCycle(bind *vpn.HybridBind, client *http.Client, serverURL, publ
 		StartHolePunching(bind, hexPeerKey, peer.Endpoints, hexSelfKey)
 	}
 
+	activeKeepAlives.Range(func(k, v interface{}) bool {
+		key := k.(string)
+		if !seenPeers[key] {
+			if cancel, ok := v.(context.CancelFunc); ok {
+				cancel()
+			}
+			activeKeepAlives.Delete(key)
+		}
+		return true
+	})
+
 	// 7. APPLY EVERYTHING AT ONCE
 	if ipcBuilder.Len() > 0 {
 		configBlob := ipcBuilder.String()
@@ -385,8 +434,8 @@ func performPollCycle(bind *vpn.HybridBind, client *http.Client, serverURL, publ
 			log.Printf("❌ Detailed Error: %v", err)
 		}
 	}
+	publishSnapshot(bind)
 }
-
 
 func pollServer(client *http.Client, serverURL, authToken, clientPubKey string) (*PollResponse, error) {
 	req, err := http.NewRequest("GET", serverURL+"/api/poll", nil)
@@ -439,33 +488,143 @@ func registerDeviceAndGetIP(serverURL, publicKey, authToken string) (*Registrati
 }
 
 func generateOrLoadKeys() (wgtypes.Key, wgtypes.Key, error) {
+	if err := ensureScaleDir(); err != nil {
+		return wgtypes.Key{}, wgtypes.Key{}, err
+	}
+	path := keyPath()
+
+	if data, err := os.ReadFile(path); err == nil {
+		keyStr := strings.TrimSpace(string(data))
+		if k, err := wgtypes.ParseKey(keyStr); err == nil {
+			return k, k.PublicKey(), nil
+		}
+	}
+
 	key, err := wgtypes.GenerateKey()
-	return key, key.PublicKey(), err
+	if err != nil {
+		return wgtypes.Key{}, wgtypes.Key{}, err
+	}
+
+	if err := writeSecureFile(path, []byte(key.String()), 0600); err != nil {
+		log.Printf("Warning: failed to save key to disk: %v", err)
+	}
+
+	return key, key.PublicKey(), nil
 }
 
 func hexKey(k wgtypes.Key) string {
 	return hex.EncodeToString(k[:])
 }
 
-func waitForShutdown(stopChan chan struct{}, bind *vpn.HybridBind) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	<-sigCh
-	log.Println("Shutdown signal received.")
-
-	// 1. Tell the polling loop to stop
-	close(stopChan)
-
-	// 2. Close the WireGuard device
+func teardownVPN(bind *vpn.HybridBind, iface string) {
+	activeKeepAlives.Range(func(k, v interface{}) bool {
+		if cancel, ok := v.(context.CancelFunc); ok {
+			cancel()
+		}
+		activeKeepAlives.Delete(k)
+		return true
+	})
 	if WgDevice != nil {
 		WgDevice.Close()
+		WgDevice = nil
 	}
 	if bind != nil {
 		bind.Shutdown()
 	}
+	_ = exec.Command("ip", "link", "delete", iface).Run()
+	removePID()
+	_ = os.Remove(socketPath())
+	_ = os.Remove(statusPath())
+	time.Sleep(200 * time.Millisecond)
+}
 
-	// 3. Optional: small delay to let goroutines print their "stopping" logs
-	time.Sleep(500 * time.Millisecond)
+func classifyNAT(srflx *Endpoint) string {
+	if srflx == nil {
+		return "Unknown"
+	}
+	if srflx.Port == listenPort {
+		return "Easy / Port-Preserving"
+	}
+	return "Restricted / Symmetric"
+}
+
+func peerStatus(last time.Time, relay bool) string {
+	if last.IsZero() {
+		return "OFFLINE"
+	}
+	age := time.Since(last)
+	if age <= 10*time.Second {
+		if relay {
+			return "HEALTHY (Relay)"
+		}
+		return "HEALTHY"
+	}
+	if age <= 20*time.Second {
+		return "DEGRADED"
+	}
+	return "OFFLINE"
+}
+
+func publishSnapshot(bind *vpn.HybridBind) {
+	if bind == nil {
+		return
+	}
+	snapshotMu.RLock()
+	peersSrc := append([]PeerInfo(nil), lastPeers...)
+	snapshotMu.RUnlock()
+	pongs := bind.SnapshotPongs()
+	relay := usingRelay.Load() || bind.IsUdpDead()
+	peers := make([]PeerSnap, 0, len(peersSrc))
+	online := 0
+	for _, peer := range peersSrc {
+		if peer.PublicKey == pubKeyStr {
+			continue
+		}
+		peerKeyBytes, err := wgtypes.ParseKey(peer.PublicKey)
+		if err != nil {
+			continue
+		}
+		hexPeerKey := hex.EncodeToString(peerKeyBytes[:])
+		transport := "Direct UDP"
+		dead := bind.IsPeerUdpDead(hexPeerKey) || usingRelay.Load()
+		if dead {
+			transport = "WebSocket Relay"
+		}
+		last := pongs[hexPeerKey]
+		st := peerStatus(last, dead)
+		if strings.HasPrefix(st, "HEALTHY") {
+			online++
+		}
+		peers = append(peers, PeerSnap{
+			OverlayIP: peer.ID,
+			PublicKey: peer.PublicKey,
+			Transport: transport,
+			LastPong:  last,
+			Status:    st,
+		})
+	}
+	nat := "Unknown"
+	if srflx := getCachedSrflx(); srflx != nil {
+		nat = classifyNAT(srflx)
+	}
+	snap := RuntimeSnapshot{
+		Status:         "CONNECTED",
+		Interface:      ifaceName,
+		OverlayIP:      overlayIP,
+		PublicKey:      pubKeyStr,
+		ControlServer:  redactURL(controlURL),
+		ControlOK:      controlOK.Load(),
+		RelayServer:    redactURL(relayURLStr),
+		RelayConnected: bind.RelayConnected(),
+		NATType:        nat,
+		UsingRelay:     relay,
+		ActivePeers:    online,
+		Peers:          peers,
+	}
+	snapshotMu.Lock()
+	snapshot = snap
+	snapshotMu.Unlock()
+	writeSnapshotFile(snap)
 }
 
 func getCachedSrflx() *Endpoint {
@@ -738,23 +897,16 @@ func ForceConfigureInterface(iface string, ipCIDR string) error {
 	return nil
 }
 
-func HealthMonitor(b *vpn.HybridBind, stopChan chan struct{}) {
+func HealthMonitor(ctx context.Context, b *vpn.HybridBind) {
 	ticker := time.NewTicker(time.Second * 2)
 	defer ticker.Stop()
-
-	usingRelay := false
 
 	for {
 		select {
 		case <-ticker.C:
 			isDead := b.IsUdpDead()
 
-			// BUG FIX: these were nested as an if/else-if under the same
-			// `isDead && !usingRelay` condition, which made the recovery
-			// branch (!isDead && usingRelay) structurally unreachable -
-			// isDead was already known true at that point. They must be
-			// two independent top-level branches.
-			if isDead && !usingRelay {
+			if isDead && !usingRelay.Load() {
 				log.Printf("udp failed! shifting to relay")
 
 				var ipcBuilder strings.Builder
@@ -769,18 +921,14 @@ func HealthMonitor(b *vpn.HybridBind, stopChan chan struct{}) {
 				})
 
 				if ipcBuilder.Len() > 0 {
-					// BUG FIX: err != nil / err == nil branches were
-					// swapped - a failed IpcSet was marking the switch
-					// as successful, and a successful IpcSet was logging
-					// "failed to switch to relay".
 					if err := WgDevice.IpcSet(ipcBuilder.String()); err != nil {
 						log.Printf("failed to switch to relay: %v", err)
 					} else {
-						usingRelay = true
+						usingRelay.Store(true)
 						log.Println("switched to relay")
 					}
 				}
-			} else if !isDead && usingRelay {
+			} else if !isDead && usingRelay.Load() {
 				log.Printf("udp recovered, switching back to direct connection")
 				var ipcBuilder strings.Builder
 				endpointCache.Range(func(key, value interface{}) bool {
@@ -795,14 +943,15 @@ func HealthMonitor(b *vpn.HybridBind, stopChan chan struct{}) {
 					if err := WgDevice.IpcSet(ipcBuilder.String()); err != nil {
 						log.Printf("failed to switch back to direct: %v", err)
 					} else {
-						usingRelay = false
+						usingRelay.Store(false)
 						log.Println("switched back to direct UDP connection")
 					}
 				} else {
-					usingRelay = false
+					usingRelay.Store(false)
 				}
 			}
-		case <-stopChan:
+			publishSnapshot(b)
+		case <-ctx.Done():
 			log.Println("stopping the health monitor")
 			return
 		}

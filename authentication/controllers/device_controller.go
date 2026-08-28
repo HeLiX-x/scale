@@ -156,6 +156,23 @@ func GetPeerConfig(c *fiber.Ctx) error {
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "Device public key is required"})
 	}
 
+	// Verify the device belongs to the authenticated user
+	userIDStr, ok := c.Locals("x-user-id").(string)
+	if !ok {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Could not get user ID from token"})
+	}
+	userID, err := strconv.ParseUint(userIDStr, 10, 32)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Invalid user ID format"})
+	}
+	ownerDevice, err := database.FindDeviceByPublicKey(clientPubKey)
+	if err != nil {
+		return c.Status(http.StatusForbidden).JSON(fiber.Map{"error": "Device not registered"})
+	}
+	if ownerDevice.UserID != uint(userID) {
+		return c.Status(http.StatusForbidden).JSON(fiber.Map{"error": "Device does not belong to authenticated user"})
+	}
+
 	// **CHANGE**: Step 1 - Fetch the device list from the Redis cache or fallback to PostgreSQL.
 	var allDevices []models.Device
 	cachedDevicesJSON, err := database.Rdb.Get(database.Ctx, "cache:all_devices").Result()
