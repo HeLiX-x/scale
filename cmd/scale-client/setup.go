@@ -149,9 +149,9 @@ func runVPN(ctx context.Context) error {
 	}
 	log.Printf("Starting WireGuard on %s : %d", wgIface, listenPort)
 
-	serverURL := strings.TrimSuffix(firstNonEmpty(os.Getenv("WG_CONTROL_SERVER"), cfg.ControlServer), "/")
+	serverURL := strings.TrimSuffix(firstNonEmpty(cfg.ControlServer, os.Getenv("WG_CONTROL_SERVER")), "/")
 	authToken := firstNonEmpty(readToken(), strings.TrimSpace(os.Getenv("AUTH_TOKEN")))
-	relayURL := firstNonEmpty(os.Getenv("RELAY_URL"), cfg.RelayURL)
+	relayURL := firstNonEmpty(cfg.RelayURL, os.Getenv("RELAY_URL"))
 	controlURL = serverURL
 	relayURLStr = relayURL
 

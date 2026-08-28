@@ -9,8 +9,28 @@ cd "$ROOT"
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "v1.0.0")"
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
 
-# 1. Build or download binary
-go build -ldflags "-X main.Version=${VERSION} -X main.GitCommit=${COMMIT}" -o scale ./cmd/scale-client
+# 1. Locate Go binary
+GO_BIN="$(command -v go || true)"
+if [ -z "${GO_BIN}" ] && [ -x "/usr/local/go/bin/go" ]; then
+  GO_BIN="/usr/local/go/bin/go"
+fi
+if [ -z "${GO_BIN}" ] && [ -n "${SUDO_USER}" ]; then
+  USER_HOME="$(eval echo "~${SUDO_USER}")"
+  for cand in "${USER_HOME}/go/bin/go" "${USER_HOME}/.local/go/bin/go" "/usr/local/go/bin/go" "/snap/bin/go"; do
+    if [ -x "$cand" ]; then
+      GO_BIN="$cand"
+      break
+    fi
+  done
+fi
+
+if [ -z "${GO_BIN}" ]; then
+  echo "Error: 'go' binary not found. Please install Go or ensure it is in your PATH."
+  exit 1
+fi
+
+# Build binary
+"${GO_BIN}" build -ldflags "-X main.Version=${VERSION} -X main.GitCommit=${COMMIT}" -o scale ./cmd/scale-client
 
 # 2. Move to system PATH
 sudo mv scale /usr/local/bin/scale
