@@ -342,26 +342,19 @@ func performPollCycle(bind *vpn.HybridBind, client *http.Client, serverURL, publ
 			continue
 		}
 
-		// 4. ENDPOINT SELECTION
+		// 4. ENDPOINT SELECTION (Prioritize public STUN srflx for WAN, host LAN for local)
 		var bestEndpoint Endpoint
 		found := false
 		for _, ep := range peer.Endpoints {
-			if strings.HasPrefix(ep.IP, "192.168.") || strings.HasPrefix(ep.IP, "10.") {
+			if ep.Type == "srflx" {
 				bestEndpoint = ep
 				found = true
 				break
 			}
 		}
-		// BUG FIX: prefer the STUN-derived public (srflx) endpoint over a
-		// blind index-0 fallback. Without this, a peer's host-enumerated
-		// addresses (e.g. a docker bridge or secondary NIC IP, whatever
-		// happened to be first in the list) could get picked over its
-		// actual reachable public address - fine on a shared LAN where
-		// almost anything routes, but silently wrong once the peer is on
-		// a different network and only the srflx address is reachable.
 		if !found {
 			for _, ep := range peer.Endpoints {
-				if ep.Type == "srflx" {
+				if strings.HasPrefix(ep.IP, "192.168.") || strings.HasPrefix(ep.IP, "10.") {
 					bestEndpoint = ep
 					found = true
 					break
@@ -409,6 +402,10 @@ func performPollCycle(bind *vpn.HybridBind, client *http.Client, serverURL, publ
 			} else {
 				log.Printf("could not resolve endpoint for keepalive, peer %s: %v", peer.PublicKey[:8], err)
 			}
+		} else {
+			// Fallback: If no direct endpoint discovered yet, route through WebSocket Relay!
+			ipcBuilder.WriteString(fmt.Sprintf("endpoint=%s\n", hexPeerKey))
+			log.Printf("🔹 PEER CONNECT (RELAY DEFAULT): %s -> %s", peer.PublicKey[:8], hexPeerKey)
 		}
 
 		// 6. HOLE PUNCHING
