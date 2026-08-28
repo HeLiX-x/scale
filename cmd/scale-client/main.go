@@ -30,6 +30,8 @@ func main() {
 
 	var err error
 	switch cmd {
+	case "register":
+		err = cmdRegister(rest)
 	case "login":
 		err = cmdLogin(rest)
 	case "up":
@@ -64,6 +66,7 @@ Usage:
   scale <command>
 
 Commands:
+  register    Create a new user account & log in
   login       Interactive login; saves JWT to ~/.scale/token
   up          Start VPN tunnel, poller, and health monitor
   status      Show client status, assigned IP, and relay state

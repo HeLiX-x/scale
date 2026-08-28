@@ -12,6 +12,9 @@ import (
 )
 
 const (
+	DefaultControlServer = "http://sankalp-scale.duckdns.org:8080"
+	DefaultRelayURL      = "wss://sankalp-scale.duckdns.org:8443/derp?auth=2_m0RLKp5f2stxVr3kpvINlJfH6efP0A"
+
 	tokenFileName  = "token"
 	keyFileName    = "wg.key"
 	configFileName = "config.json"
@@ -94,10 +97,15 @@ func writeSecureFile(path string, data []byte, perm os.FileMode) error {
 func loadConfig() ClientConfig {
 	var cfg ClientConfig
 	data, err := os.ReadFile(configPath())
-	if err != nil {
-		return cfg
+	if err == nil {
+		_ = json.Unmarshal(data, &cfg)
 	}
-	_ = json.Unmarshal(data, &cfg)
+	if cfg.ControlServer == "" {
+		cfg.ControlServer = DefaultControlServer
+	}
+	if cfg.RelayURL == "" {
+		cfg.RelayURL = DefaultRelayURL
+	}
 	return cfg
 }
 
