@@ -582,8 +582,9 @@ func publishSnapshot(bind *vpn.HybridBind) {
 			continue
 		}
 		hexPeerKey := hex.EncodeToString(peerKeyBytes[:])
+		_, hasUdpEndpoint := endpointCache.Load(hexPeerKey)
 		transport := "Direct UDP"
-		dead := bind.IsPeerUdpDead(hexPeerKey) || usingRelay.Load()
+		dead := bind.IsPeerUdpDead(hexPeerKey) || usingRelay.Load() || !hasUdpEndpoint
 		if dead {
 			transport = "WebSocket Relay"
 		}

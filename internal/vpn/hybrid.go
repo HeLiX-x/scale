@@ -198,6 +198,10 @@ func (b *HybridBind) readWS() {
 			data := msg[32:]
 			var key [32]byte
 			copy(key[:], senderKey)
+			hexKey := hex.EncodeToString(senderKey)
+			b.pongLock.Lock()
+			b.lastPongs[hexKey] = time.Now()
+			b.pongLock.Unlock()
 			select {
 			case b.rxChan <- Packet{Data: data, Endpoint: &RelayEndpoint{Key: key}}:
 			default:
