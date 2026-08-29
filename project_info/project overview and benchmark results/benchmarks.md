@@ -525,9 +525,9 @@ This benchmark validates the scalability of Scale's WireGuard mesh network acros
 
 | Node | Operating System | Physical Network & ISP | Assigned Overlay IP | Role |
 |---|---|---|---|---|
-| **Node 1 (Local)** | Ubuntu 24.04 LTS (Kernel 6.8) | **Jio 5G Mobile Hotspot** (Cellular CGNAT) | `100.64.100.145` | Test Coordinator / Client |
-| **Node 2** | Windows 11 (WSL2 Ubuntu) | **Airtel Fiber Broadband** (Residential NAT) | `100.64.174.238` | Remote Mesh Peer |
-| **Node 3** | Arch Linux (Rolling, Kernel 6.13) | **Jio 4G Mobile Hotspot** (Cellular CGNAT) | `100.64.61.181` | Remote Mesh Peer |
+| **Node 1 (Local)** | Ubuntu 24.04 LTS (Kernel 6.8) | **Jio 5G Mobile Hotspot (Phone 1)** (Cellular CGNAT) | `100.64.100.145` | Test Coordinator / Client |
+| **Node 2** | Windows 11 (WSL2 Ubuntu) | **Airtel Fiber Broadband** (Residential Home WiFi) | `100.64.174.238` | Remote Mesh Peer |
+| **Node 3** | Arch Linux (Rolling, Kernel 6.13) | **Jio 4G Mobile Hotspot (Phone 2)** (Separate Phone CGNAT) | `100.64.61.181` | Remote Mesh Peer |
 
 ---
 

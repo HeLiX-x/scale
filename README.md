@@ -109,15 +109,15 @@ All local state is stored in `~/.scale/` with strict POSIX permissions (`0700` d
 Comprehensive benchmarks were executed across three real-world topologies:
 1. **Local Kernel Loopback** (`127.0.0.1` high-throughput data-plane test)
 2. **2-Node Cross-Carrier Cellular WAN** (Jio 5G $\leftrightarrow$ Jio 4G via AWS Mumbai Relay)
-3. **3-Node Multi-Carrier & Cross-Platform Mesh** (Ubuntu 24.04 on Jio 5G $\leftrightarrow$ Windows 11 WSL2 on Airtel Fiber $\leftrightarrow$ Arch Linux on Jio 4G)
+3. **3-Node Multi-Carrier & Cross-Platform Mesh** (Ubuntu 24.04 Linux on Jio 5G Phone Hotspot $\leftrightarrow$ Windows 11 WSL2 on Airtel Home Fiber $\leftrightarrow$ Arch Linux on a separate Jio 4G Phone Hotspot)
 
 Full raw logs, test outputs, and socket traces are recorded in [`project_info/project overview and benchmark results/benchmarks.md`](project_info/project%20overview%20and%20benchmark%20results/benchmarks.md).
 
 ### Performance Comparison Matrix
 
-| Benchmark Metric | Local Loopback (`wg0` $\leftrightarrow$ `wg1`) | Jio 5G $\leftrightarrow$ Airtel Fiber (Windows WSL2) | Jio 5G $\leftrightarrow$ Jio 4G (Arch Linux) |
+| Benchmark Metric | Local Loopback (`wg0` $\leftrightarrow$ `wg1`) | Jio 5G Hotspot $\leftrightarrow$ Airtel Fiber (Windows WSL2) | Jio 5G Hotspot $\leftrightarrow$ Jio 4G Hotspot (Arch Linux) |
 |---|:---:|:---:|:---:|
-| **Physical Topology** | Kernel Loopback (`127.0.0.1`) | Cellular WAN $\leftrightarrow$ Residential Broadband | Cellular WAN $\leftrightarrow$ Cellular WAN |
+| **Physical Topology** | Kernel Loopback (`127.0.0.1`) | Cellular 5G Phone $\leftrightarrow$ Home Residential Fiber | Separate 5G Phone $\leftrightarrow$ Separate 4G Phone (Dual Mobile CGNAT) |
 | **OS Platforms** | Ubuntu Linux $\leftrightarrow$ Ubuntu Linux | Ubuntu 24.04 $\leftrightarrow$ Windows 11 (WSL2) | Ubuntu 24.04 $\leftrightarrow$ Arch Linux (Rolling) |
 | **Active Transport** | Direct UDP (Loopback) | WebSocket Relay (AWS Mumbai) | WebSocket Relay (AWS Mumbai) |
 | **Route Stability** | 100% Stable (0 Flaps) | **100% Stable (0 Flaps)** | **100% Stable (0 Flaps)** |
@@ -133,7 +133,11 @@ Full raw logs, test outputs, and socket traces are recorded in [`project_info/pr
 
 ### Detailed Test Summaries
 
-1. **Simultaneous 3-Node Multi-Carrier Mesh**: Enrolled 3 heterogeneous nodes (Ubuntu Linux on Jio 5G, Windows 11 WSL2 on Airtel Fiber, and Arch Linux on Jio 4G) into a single private `/16` overlay (`100.64.0.0/16`) with active bidirectional 3-way routing.
+1. **Simultaneous 3-Node Multi-Carrier Mesh**: Enrolled 3 physical devices across 3 isolated networks into a single private `/16` overlay (`100.64.0.0/16`):
+   - **Node 1 (Local):** Ubuntu 24.04 Linux tethered to a **Jio 5G Mobile Hotspot (Phone 1)**.
+   - **Node 2:** Windows 11 running **WSL2** connected to **Airtel Residential Fiber Broadband**.
+   - **Node 3:** Arch Linux laptop tethered to an independent **Jio 4G Mobile Hotspot (Phone 2)**.
+   All 3 devices established simultaneous, bidirectional 3-way routing with sub-second keepalive liveness.
 2. **Telecom-Grade Low Jitter (`19.58 ms`)**: 50-packet rapid stream across Jio 5G and Airtel Broadband achieved an average latency of 119.9 ms and 19.58 ms jitter—well within the $< 30$ ms SLA for real-time VoIP, gaming, and interactive SSH.
 3. **WireGuard MTU Clamping (1420 Bytes)**: Full-size 1392-byte ICMP payloads (1420-byte WireGuard frames) achieved 0.0% packet loss across all carriers and OS environments, proving zero Path MTU (PMTU) black holes or fragmentation drops.
 4. **Lightweight Daemon Footprint**: The userspace WireGuard engine, `HybridBind` dual transport, Trickle ICE STUN poller, and UNIX IPC daemon maintain a steady-state footprint of **~23.4 MB RAM (RSS)** and **0.5% CPU**.
