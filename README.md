@@ -1,22 +1,42 @@
-# Scale
+# Scale — Mesh WireGuard VPN
 
-Scale is a **Tailscale-alternative mesh VPN** built from scratch in Go. It creates a WireGuard-based overlay network where devices authenticate against a central control server, discover each other's endpoints, and establish encrypted peer-to-peer tunnels — with automatic fallback to a WebSocket relay when direct UDP connectivity is blocked by Symmetric NAT / CGNAT.
+Scale is a **Tailscale-alternative mesh VPN** built from scratch in Go. It creates a WireGuard-based overlay network where devices authenticate against a central control server, discover each other's endpoints, and establish encrypted peer-to-peer tunnels — with automatic fallback to a WebSocket relay when direct UDP connectivity is blocked by Symmetric NAT / Carrier-Grade NAT (CGNAT).
 
 ---
 
-## Overview
+## Architecture Overview
 
 Scale is composed of three cooperating binaries:
 
-- **Control Server** (`main.go`) — a Fiber HTTP API that handles user/device authentication, `/16` IP allocation, and peer discovery via a poll model. Backed by PostgreSQL (source of truth) and Redis (cache, dynamic IP pool, live endpoints).
-- **Relay Server** (`cmd/relay`) — a DERP-style WebSocket relay used as a fallback data path when direct UDP connectivity fails across restrictive carrier NATs.
-- **Client** (`cmd/scale-client`) — a userspace WireGuard engine with a custom dual-path transport (`HybridBind`) that can move traffic between direct UDP and the WebSocket relay, featuring asynchronous Trickle ICE STUN discovery, continuous roaming detection, bidirectional SmartTrust cache synchronization, and state-gated health monitoring.
+- **Control Server** (`main.go`) — a high-performance Fiber HTTP API handling user/device authentication, `/16` IP allocation, and peer discovery. Backed by PostgreSQL (persistent source of truth) and Redis (caching, atomic IP pool, live endpoints).
+- **Relay Server** (`cmd/relay`) — a DERP-style WebSocket relay providing an encrypted fallback data path when direct UDP connectivity fails across restrictive carrier firewalls.
+- **Client** (`cmd/scale-client`) — a userspace WireGuard engine with a custom dual-path transport (`HybridBind`) that seamlessly switches between direct UDP and the WebSocket relay, featuring asynchronous Trickle ICE STUN discovery, continuous roaming detection, bidirectional SmartTrust cache synchronization, and state-gated health monitoring.
+
+```
+                    ┌────────────────────────────────────────────────────────┐
+                    │                   AWS EC2 (Mumbai)                     │
+                    │   sankalp-scale.duckdns.org (Let's Encrypt TLS)        │
+                    │  ┌───────────────────────┐  ┌───────────────────────┐  │
+                    │  │ Control Server (:8080)│  │ WebSocket Relay(:8443)│  │
+                    │  │ (Fiber + PG + Redis)  │  │ (DERP Packet Switch)  │  │
+                    │  └───────────────────────┘  └───────────────────────┘  │
+                    └─────────────────────────┬──────────────────────────────┘
+                                              │ Control & Fallback
+                                              │
+                    ┌─────────────────────────┴──────────────────────────────┐
+                    ▼                                                        ▼
+         ┌─────────────────────┐                                  ┌─────────────────────┐
+         │      Laptop 1       │ ◄ - - - - - - - - - - - - - - -► │      Laptop 2       │
+         │   (e.g., Jio 5G)    │      Direct P2P UDP (51820)      │   (e.g., Jio 4G)    │
+         │  Overlay: 100.64.x  │        (Encrypted Noise)         │  Overlay: 100.64.y  │
+         └─────────────────────┘                                  └─────────────────────┘
+```
 
 ---
 
 ## Key Features
 
-- **End-to-End Go Implementation**: Full control-plane, DERP relay, and client implementation in pure Go without forking WireGuard tooling.
+- **End-to-End Go Implementation**: Full control-plane, DERP relay, and client implementation in pure Go without forking external WireGuard tooling.
 - **Scalable `/16` IP Allocation**: Redis-backed atomic IP allocation managing a `/16` CGNAT pool (`100.64.0.0/16`) supporting **65,534 usable device IPs**.
 - **Control Plane Resilience**: Synchronous cache warmup (`refreshDeviceCache()`) and automatic PostgreSQL fallback for `/api/poll` and peer configuration lookups.
 - **Trickle ICE & STUN Discovery**: Dispatches local candidate endpoints immediately on boot and asynchronously streams public server-reflexive endpoints upon STUN resolution (`stun.l.google.com:19302`).
@@ -25,149 +45,182 @@ Scale is composed of three cooperating binaries:
 - **Two-Way Endpoint Cache Synchronization**: Prevents periodic 30s poll cycles from clobbering live roaming endpoints discovered by SmartTrust.
 - **State-Gated Recovery Hysteresis**: Requires 3 consecutive probe pongs before clearing fail counters on dead connections, eliminating flapping on lossy mobile links.
 - **Recursive Tunnel Loop Filter**: Enforces address-based CIDR filtering (`100.64.0.0/10`) to prevent the virtual overlay interface from being advertised as a physical endpoint.
+- **Productized Zero-Friction CLI**: Dedicated `register`, `login`, `up`, `status`, `peers`, `down`, `logout`, and `bugreport` commands with secure `0600` credential management.
 
 ---
 
-## Control Server
+## Production Cloud Deployment
 
-The control server manages identity, IP allocation, and peer coordination without proxying data traffic.
+The live control plane and WebSocket relay are deployed on AWS EC2 with automated systemd lifecycle management and security hardening.
 
-| Component | Technology | Description |
+| Component | Specification / Setting | Details |
 |---|---|---|
-| HTTP framework | [Fiber](https://gofiber.io/) | High-performance Go web framework |
-| Primary datastore | PostgreSQL via GORM | Persistent source of truth for users and devices |
-| Cache / ephemeral state | Redis | In-memory cache, atomic `/16` IP pool, and candidate endpoints |
-| Authentication | JWT (HS256) + bcrypt | Stateless user and device authorization |
+| **Cloud Host** | AWS EC2 `t3.micro` | Ubuntu 24.04 LTS (Region: `ap-south-1` Mumbai) |
+| **Domain & DNS** | DuckDNS Dynamic DNS | `sankalp-scale.duckdns.org` $\rightarrow$ Elastic IP |
+| **TLS / HTTPS** | Let's Encrypt via Certbot | Automated SSL certificates on `:8443` (WSS) and `:8080` |
+| **Primary Database** | PostgreSQL 16 | Bound strictly to `127.0.0.1:5432` |
+| **Cache & IP Pool** | Redis 7 | Bound strictly to `127.0.0.1:6379` (`protected-mode yes`) |
+| **Firewall** | UFW (Uncomplicated Firewall) | Default Inbound Deny; Ingress allowed only on `22/tcp`, `8080/tcp`, `8443/tcp`, `51820/udp` |
+| **Process Supervision** | Systemd System Services | `scale-control.service` & `scale-relay.service` (auto-start on boot) |
 
-### Data Flow
-
-1. **Device Registration** — Client sends WireGuard public key; server allocates an IP atomically via `SPOP` from `ip_pool:available` and persists the device in PostgreSQL.
-2. **Heartbeat** — Client reports local physical endpoints and STUN-derived public `ip:port`; validated against JWT user ownership and stored in Redis with a 90s TTL (`device:endpoints:<pubkey>`).
-3. **Poll** — Client queries `/api/poll` to fetch all peers and candidate endpoints, falling back to PostgreSQL if Redis is cold.
-4. **Device Cache Warmup** — All devices are cached in Redis (`cache:all_devices`) synchronously at boot, then refreshed every 10s by a background worker.
+### Infrastructure Hardening Guarantee
+The control plane binary contains hard startup assertions (`database/local_only.go`) that immediately abort execution if `DATABASE_URL` or `REDIS_ADDR` resolve to anything other than loopback (`127.0.0.1`, `localhost`, `::1`), eliminating the risk of accidental exposure to the public internet.
 
 ---
 
-## Client Architecture
+## Productized CLI Reference
 
-A userspace WireGuard client designed for seamless resilience across cellular NAT boundaries and roaming events.
+The `scale` CLI provides a complete user experience for enrolling devices, starting sessions, and diagnosing mesh health.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as Control Server
-    participant STUN as Google STUN
-    participant R as Relay (AWS)
+```bash
+Scale VPN — mesh WireGuard client
 
-    C->>C: Load/Generate WireGuard Keypair
-    C->>S: POST /api/login (JWT)
-    C->>S: POST /api/devices/register (Allocates 100.64.x.x/16)
-    C->>C: Create TUN Interface (wg0) & configure /16 route
-    C->>R: Connect WebSocket Relay (wss://:8443/derp)
-    C->>C: Start HybridBind & Userspace WireGuard Engine
-    C->>S: Immediate Heartbeat with Local Host IPs (excluding 100.64.0.0/10)
-    C->>STUN: Async STUN Probe (Trickle ICE)
-    STUN-->>C: STUN Public Endpoint (srflx)
-    C->>S: Secondary Heartbeat with STUN Endpoint
-    loop Every 30s (Poll Cycle)
-        C->>S: GET /api/poll
-        S-->>C: Active peer list & endpoints
-        C->>C: Update WireGuard IPC & preserve SmartTrust endpoints
-        C->>C: 5-round hole punching spray to candidates
-        C->>C: Start dynamic keepalives per peer (IpMap lookup)
-    end
+Usage:
+  scale <command>
+
+Commands:
+  register    Create a new user account & log in
+  login       Interactive login; saves JWT to ~/.scale/token
+  up          Start VPN tunnel, poller, and health monitor
+  status      Show client status, assigned IP, and relay state
+  peers       Table of mesh peers and ping status
+  down        Stop VPN session and remove wg0
+  logout      Clear local token and credentials
+  bugreport   Write a redacted diagnostic snapshot
+  version     Show build version, git commit, and architecture
 ```
 
-### Custom Protocol Framing
+### Local State & Security Architecture
+All local state is stored in `~/.scale/` with strict POSIX permissions (`0700` directory, `0600` credential files). The CLI resolves paths via `SUDO_USER`, allowing `scale register`/`login` (run as normal user) to write credentials that are seamlessly read by `sudo scale up`.
 
-| Protocol | Magic Header | Size | Purpose |
-|---|---|---|---|
-| WireGuard | `0x01`–`0x04` (first byte) | Variable | WireGuard handshake and encrypted transport |
-| STUN | `0x2112A442` (bytes 4–8) | Variable | Public NAT discovery |
-| Probe / Keepalive | `0xFF505242` (bytes 0–4) | 36 bytes | Liveness, latency tracking, and roaming detection |
-
----
-
-## Relay Server
-
-A high-throughput **DERP-style** WebSocket relay used when direct UDP is blocked by Symmetric NAT / CGNAT:
-
-- Listens on `wss://:8443/derp` with TLS encryption.
-- Authenticated via `DERP_AUTH_KEY` query parameter.
-- Routes packets: `[dest_key(32B) | payload]` $\rightarrow$ looked up in memory map $\rightarrow$ forwarded as `[sender_key(32B) | payload]`.
-- End-to-end encrypted: the relay operates solely on ciphertext; payloads are decrypted only by destination WireGuard endpoints.
+| File Path | Permissions | Purpose |
+|---|:---:|---|
+| `~/.scale/token` | `0600` | Stored JWT token from authentication |
+| `~/.scale/wg.key` | `0600` | Persistent WireGuard private key |
+| `~/.scale/config.json` | `0600` | Default control server and relay endpoints |
+| `~/.scale/scale.sock` | `0660` | UNIX domain socket for non-root IPC status queries |
+| `~/.scale/scale.pid` | `0644` | Active daemon process PID |
+| `~/.scale/status.json` | `0644` | Atomic runtime snapshot for telemetry |
 
 ---
 
 ## Validated Performance Benchmarks
 
-Full raw outputs, `iperf3` logs, and topology details are documented in [`project_info/project overview and benchmark results/benchmarks.md`](project_info/project%20overview%20and%20benchmark%20results/benchmarks.md).
+Comprehensive benchmarks were executed across two environments: (1) Local Kernel Loopback, and (2) Real-World Cross-Carrier Cellular WAN (Jio 5G $\leftrightarrow$ Jio 4G across two mobile hotspots via AWS Mumbai Relay).
 
-### Live Cross-WAN Cellular Results (Jio 5G $\leftrightarrow$ Jio 4G via AWS Mumbai Relay)
+Full raw logs, test outputs, and socket traces are recorded in [`project_info/project overview and benchmark results/benchmarks.md`](project_info/project%20overview%20and%20benchmark%20results/benchmarks.md).
 
-| Benchmark Metric | Test Conditions | Result | Key Significance |
-|---|---|:---:|---|
-| **Route Stability** | 100 ICMP packets over 100s | **96% Delivery / 0 Flaps** | Flapping bug permanently resolved |
-| **Round-Trip Latency** | Double cellular hop via AWS | **333.3 ms avg (165.9 ms min)** | Consistent cross-carrier transit |
-| **Forward TCP Throughput** | 10s `iperf3` Stream (5G $\rightarrow$ 4G) | **3.56 Mbps (6.29 Mbps peak)** | **0 TCP Retransmissions** (`Retr: 0`) |
-| **UDP Jitter & Loss** | 5.00 Mbps Stream (4,568 pkts) | **0.0% Loss / 8.12 ms Jitter** | Telecom-grade timing for VoIP/SSH |
-| **Reverse TCP Throughput** | 10s `iperf3` Stream (4G $\rightarrow$ 5G) | **1.15 Mbps (4.19 Mbps peak)** | **0 TCP Retransmissions** on 4G uplink |
-| **HTTP Application Traffic** | Chrome Browser Directory Listing | **HTTP 200 OK** | Full Layer 7 web rendering over VPN |
-| **10MB Binary Transfer** | Continuous `curl` streaming | **100% Bit-Perfect (105s duration)** | Zero resets under continuous load |
+### Performance Comparison Matrix
+
+| Benchmark Metric | Local Loopback (`wg0` $\leftrightarrow$ `wg1`) | Broken WAN Build (Pre-v2 Revert) | Live Cellular WAN (Post-v2 Fixes) |
+|---|:---:|:---:|:---:|
+| **Physical Transport** | Kernel Loopback (`127.0.0.1`) | Home WiFi $\leftrightarrow$ Jio Hotspot | Jio 5G $\leftrightarrow$ Jio 4G via AWS Relay |
+| **Route Flapping Period** | None (N/A) | **Flapped every ~26–34s** | **0 Flaps (100% Stable)** |
+| **ICMP Packet Loss** | 0.0% | 100% during flap blackouts | **0.0% – 4.0% (Cellular Normal)** |
+| **Average Latency** | 0.077 ms | 170ms $\leftrightarrow$ 700ms (oscillating) | **333.3 ms (Consistent)** |
+| **TCP Throughput (Forward)** | **40.0 Gbps** | 0.0 Mbps (Stalled Data Plane) | **3.56 Mbps (6.29 Mbps peak)** |
+| **TCP Retransmissions** | 0 | Connection Reset / Stalled | **0 Retransmissions (`Retr: 0`)** |
+| **UDP Stream Loss Rate** | 0.0% | Dropped on timeout | **0.0% (0 / 4,568 packets)** |
+| **UDP Stream Jitter** | $< 0.1$ ms | Massive ($> 500$ ms) | **8.126 ms** (Telecom-grade SLA) |
+| **HTTP / Application Traffic** | Functional | Stalled on poll rewrite | **Fully Functional (Browser & Curl)** |
+| **10MB Binary File Transfer** | Instant | Connection Failed | **100% Bit-Perfect (105s duration)** |
+
+### Detailed Test Summaries (Cellular WAN: Jio 5G $\leftrightarrow$ Jio 4G)
+
+1. **ICMP Stability & Flap Elimination**: 100 consecutive ICMP packets over 100 seconds achieved a 96% delivery rate with **0 route resets or blackouts**, confirming that Bug #1 (`IpcSet` recovery) and Bug #8 (state-gated hysteresis) permanently eliminated the 30-second route oscillation.
+2. **Forward TCP Throughput (`iperf3`)**: Sustained 3.56 Mbps throughput with **zero TCP retransmissions** (`Retr: 0`). The congestion window (`Cwnd`) expanded smoothly from 37.4 KB to 399 KB, proving zero socket bufferbloat.
+3. **UDP Datagram Reliability & Jitter**: Fixed 5.00 Mbps UDP stream transmitted 4,568 datagrams with **0.0% packet loss** and **8.126 ms jitter** (well within the $< 30$ ms telecom SLA for real-time VoIP/gaming).
+4. **Layer 7 Web Server Rendering**: Hosted a Python HTTP web server on Laptop 2 and rendered directory HTML listings inside Google Chrome on Laptop 1 with `HTTP 200 OK`.
+5. **10MB Binary Payload Transfer**: Streamed 10 MB (80 Megabits) of random binary data via `curl` over 105 seconds with zero socket resets and 100% bit-perfect checksum verification.
 
 ---
 
-## Getting Started
+## Real-World Use Cases
 
-### Prerequisites
+Scale provides a flat, encrypted virtual network (`100.64.0.0/16`) where all enrolled devices communicate as if they are on the same local switch:
 
-- Go 1.23+ (toolchain pinned to 1.24.x in `go.mod`)
-- PostgreSQL (control-plane datastore)
-- Redis (cache, IP pool, live endpoint storage)
-- Linux machine with `sudo` permissions (for WireGuard TUN device creation)
+- **Localhost & API Sharing (ngrok Alternative)**: Expose local development servers (`localhost:3000`) directly to teammates over `100.64.x.x` without public URLs, data caps, or third-party proxies.
+- **Remote Database Access**: Connect GUI tools (DBeaver, pgAdmin, Compass) on one machine directly to local databases on another machine over private encrypted channels.
+- **Homelab & Remote SSH**: SSH into home servers or development rigs (`ssh user@100.64.x.x`) from coffee shops or mobile networks without port forwarding.
+- **Virtual LAN Gaming**: Play multiplayer LAN games (Minecraft, CS, retro emulators) with friends across different physical locations with direct IP connect.
+- **Direct P2P File Transfers**: Transfer multi-gigabyte datasets directly using standard tools (`scp`, `rsync`, LocalSend, or GUI SFTP) without cloud intermediate storage.
+- **Remote Game Streaming**: Stream high-end AAA games from a heavy GPU rig to a thin-and-light laptop at 60–120 FPS using **Sunshine** and **Moonlight** over the private overlay.
 
-### Build
+---
+
+## Quickstart Guide
+
+### 1. Installation
 
 ```bash
 git clone https://github.com/Sankalprai224/scale.git
 cd scale
-
-# Control server
-go build -o scale-server ./main.go
-
-# Relay
-go build -o relay ./cmd/relay
-
-# Client
-go build -o scale-client ./cmd/scale-client
+./install.sh
 ```
 
-### Configuration (`.env`)
+### 2. Register or Log In
 
-```env
-JWT_SECRET=<random base64 secret>
-DEVICE_AUTH_SECRET=<random base64 secret>
-DATABASE_URL=postgres://scale_user:password@localhost:5432/scale_db?sslmode=disable
-REDIS_ADDR=localhost:6379
-PORT=8080
-DERP_AUTH_KEY=<shared relay auth key>
-RELAY_URL=wss://<relay-host>:8443/derp?auth=<DERP_AUTH_KEY>
-WG_CONTROL_SERVER=http://<control-host>:8080
-SCALE_EMAIL=user@example.com
-SCALE_PASSWORD=password123
+For a new account:
+```bash
+scale register
 ```
 
-### Running Locally
+Or log in to an existing account:
+```bash
+scale login
+```
+
+### 3. Connect to the Mesh
 
 ```bash
-# 1. Start the control server
-./scale-server
+sudo scale up
+```
 
-# 2. Start the relay
-./relay
+### 4. Inspect Status and Peers
 
-# 3. Run client with root privileges
-sudo ./scale-client
+In a second terminal:
+```bash
+# Check client health and transport mode
+scale status
+
+# View mesh peer table and live ping latency
+scale peers
+
+# Test direct ping
+ping 100.64.x.x
+```
+
+### 5. Disconnect
+
+```bash
+sudo scale down
+```
+
+---
+
+## Self-Hosting / Server Setup
+
+To deploy your own control plane and WebSocket relay on an Ubuntu server:
+
+```bash
+# 1. Clone repository
+git clone https://github.com/Sankalprai224/scale.git
+cd scale
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env with your PostgreSQL credentials, JWT secrets, and domain name
+
+# 3. Apply security hardening (bind DBs to 127.0.0.1 & configure UFW)
+sudo ./deploy/harden.sh
+
+# 4. Build binaries
+go build -o scale-server ./main.go
+go build -o relay ./cmd/relay
+
+# 5. Run services (or configure via systemd)
+./scale-server &
+./relay &
 ```
 
 ---
@@ -175,4 +228,5 @@ sudo ./scale-client
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
 
