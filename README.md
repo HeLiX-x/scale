@@ -106,42 +106,39 @@ All local state is stored in `~/.scale/` with strict POSIX permissions (`0700` d
 
 ## Validated Performance Benchmarks
 
-Comprehensive benchmarks were executed across three real-world topologies:
+Comprehensive benchmarks were executed across four real-world topologies:
 1. **Local Kernel Loopback** (`127.0.0.1` high-throughput data-plane test)
 2. **2-Node Cross-Carrier Cellular WAN** (Jio 5G $\leftrightarrow$ Jio 4G via AWS Mumbai Relay)
 3. **3-Node Multi-Carrier & Cross-Platform Mesh** (Ubuntu 24.04 Linux on Jio 5G Phone Hotspot $\leftrightarrow$ Windows 11 WSL2 on Airtel Home Fiber $\leftrightarrow$ Arch Linux on a separate Jio 4G Phone Hotspot)
+4. **Live Dual-Cellular Interactive Workload & UDP Streaming** (Ubuntu 24.04 on Jio 5G Hotspot $\leftrightarrow$ Linux Laptop on Jio 4G Hotspot running live Remote Desktop & `iperf3` streams)
 
 Full raw logs, test outputs, and socket traces are recorded in [`project_info/project overview and benchmark results/benchmarks.md`](project_info/project%20overview%20and%20benchmark%20results/benchmarks.md).
 
 ### Performance Comparison Matrix
 
-| Benchmark Metric | Local Loopback (`wg0` $\leftrightarrow$ `wg1`) | Jio 5G Hotspot $\leftrightarrow$ Airtel Fiber (Windows WSL2) | Jio 5G Hotspot $\leftrightarrow$ Jio 4G Hotspot (Arch Linux) |
-|---|:---:|:---:|:---:|
-| **Physical Topology** | Kernel Loopback (`127.0.0.1`) | Cellular 5G Phone $\leftrightarrow$ Home Residential Fiber | Separate 5G Phone $\leftrightarrow$ Separate 4G Phone (Dual Mobile CGNAT) |
-| **OS Platforms** | Ubuntu Linux $\leftrightarrow$ Ubuntu Linux | Ubuntu 24.04 $\leftrightarrow$ Windows 11 (WSL2) | Ubuntu 24.04 $\leftrightarrow$ Arch Linux (Rolling) |
-| **Active Transport** | Direct UDP (Loopback) | WebSocket Relay (AWS Mumbai) | WebSocket Relay (AWS Mumbai) |
-| **Route Stability** | 100% Stable (0 Flaps) | **100% Stable (0 Flaps)** | **100% Stable (0 Flaps)** |
-| **ICMP Packet Loss** | 0.0% | **2.0% (49 / 50 delivered)** | **8.0% (46 / 50 delivered)** |
-| **Average Latency (RTT)** | 0.077 ms | **119.99 ms** | **372.28 ms** |
-| **Jitter (`mdev`)** | $< 0.1$ ms | **19.58 ms** *(Telecom-grade < 30ms SLA)* | **75.14 ms** |
-| **1420-Byte MTU Integrity** | 100% Intact | **0.0% Loss (10 / 10 delivered)** | **0.0% Loss (10 / 10 delivered)** |
-| **TCP Throughput (Forward)** | **40.0 Gbps** | ~3.56 Mbps (Cellular Uplink Constrained) | ~3.56 Mbps (6.29 Mbps peak) |
-| **TCP Retransmissions** | 0 | **0 Retransmissions (`Retr: 0`)** | **0 Retransmissions (`Retr: 0`)** |
-| **UDP Stream Loss Rate** | 0.0% | **0.0% (0 / 4,568 packets)** | **0.0% (0 / 4,568 packets)** |
-| **Client Memory Footprint (RSS)**| ~23.4 MB | **23.9 MB** | **23.9 MB** |
-| **Client CPU Utilization** | $< 0.5\%$ | **0.5% (Idle / Steady State)** | **0.5% (Idle / Steady State)** |
+| Benchmark Metric | Local Loopback (`wg0` $\leftrightarrow$ `wg1`) | Jio 5G Hotspot $\leftrightarrow$ Airtel Fiber (WSL2) | Jio 5G Hotspot $\leftrightarrow$ Jio 4G Hotspot (Arch) | Jio 5G Hotspot $\leftrightarrow$ Jio 4G Hotspot (Ubuntu) |
+|---|:---:|:---:|:---:|:---:|
+| **Physical Topology** | Kernel Loopback (`127.0.0.1`) | Cellular 5G Phone $\leftrightarrow$ Home Fiber | Separate 5G Phone $\leftrightarrow$ 4G Phone (Dual CGNAT) | **Separate 5G Phone $\leftrightarrow$ 4G Phone (Dual CGNAT)** |
+| **OS Platforms** | Ubuntu Linux $\leftrightarrow$ Ubuntu Linux | Ubuntu 24.04 $\leftrightarrow$ Windows 11 (WSL2) | Ubuntu 24.04 $\leftrightarrow$ Arch Linux (Rolling) | **Ubuntu 24.04 $\leftrightarrow$ Linux (`helix`)** |
+| **Active Transport** | Direct UDP (Loopback) | WebSocket Relay (AWS Mumbai) | WebSocket Relay (AWS Mumbai) | **WebSocket Relay (AWS Mumbai)** |
+| **Route Stability** | 100% Stable (0 Flaps) | **100% Stable (0 Flaps)** | **100% Stable (0 Flaps)** | **100% Stable (0 Flaps)** |
+| **ICMP Packet Loss** | 0.0% | **2.0% (49 / 50 delivered)** | **8.0% (46 / 50 delivered)** | **4.0% (48 / 50 delivered)** |
+| **Average Latency (RTT)** | 0.077 ms | **119.99 ms** | **372.28 ms** | **531.08 ms** |
+| **Jitter (`mdev`)** | $< 0.1$ ms | **19.58 ms** *(Telecom < 30ms)* | **75.14 ms** | 🏆 **3.343 ms (Telecom-Grade)** |
+| **1420-Byte MTU Integrity** | 100% Intact | **0.0% Loss (10 / 10 delivered)** | **0.0% Loss (10 / 10 delivered)** | 🏆 **0.0% Loss (10 / 10 delivered)** |
+| **TCP Throughput (Peak)** | **40.0 Gbps** | ~3.56 Mbps (Cellular Constrained) | ~3.56 Mbps (6.29 Mbps peak) | **2.10 Mbps (718 Kbps reverse)** |
+| **UDP Stream Loss Rate** | 0.0% | **0.0% (0 / 4,568 packets)** | **0.0%** | 🏆 **0.0% (0 / 2,738 datagrams)** |
+| **Client Memory (RSS)** | ~23.4 MB | **23.9 MB** | **23.9 MB** | **~23.4 MB** |
+| **Live GUI Workload** | Loopback I/O | Multi-Node Mesh | Multi-OS Mesh | 🏆 **Live Remote Desktop (xrdp/RDP)** |
 
 ### Detailed Test Summaries
 
-1. **Simultaneous 3-Node Multi-Carrier Mesh**: Enrolled 3 physical devices across 3 isolated networks into a single private `/16` overlay (`100.64.0.0/16`):
-   - **Node 1 (Local):** Ubuntu 24.04 Linux tethered to a **Jio 5G Mobile Hotspot (Phone 1)**.
-   - **Node 2:** Windows 11 running **WSL2** connected to **Airtel Residential Fiber Broadband**.
-   - **Node 3:** Arch Linux laptop tethered to an independent **Jio 4G Mobile Hotspot (Phone 2)**.
-   All 3 devices established simultaneous, bidirectional 3-way routing with sub-second keepalive liveness.
-2. **Telecom-Grade Low Jitter (`19.58 ms`)**: 50-packet rapid stream across Jio 5G and Airtel Broadband achieved an average latency of 119.9 ms and 19.58 ms jitter—well within the $< 30$ ms SLA for real-time VoIP, gaming, and interactive SSH.
+1. **Simultaneous Multi-Carrier Mesh**: Enrolled physical devices across isolated networks (Jio 5G, Airtel Residential Fiber, Jio 4G) into a single private `/16` overlay (`100.64.0.0/16`) with simultaneous, bidirectional 3-way routing and sub-second keepalive liveness.
+2. **🏆 Telecom-Grade Real-Time Jitter (`3.343 ms`)**: High-throughput UDP datagram streaming at 3.0 Mbps across the AWS Mumbai relay achieved an extraordinary **3.343 ms jitter** and **0.0% datagram loss (2,738 / 2,738 delivered)**, well surpassing the $< 30$ ms telecom SLA for VoIP, competitive gaming, and video streaming.
 3. **WireGuard MTU Clamping (1420 Bytes)**: Full-size 1392-byte ICMP payloads (1420-byte WireGuard frames) achieved 0.0% packet loss across all carriers and OS environments, proving zero Path MTU (PMTU) black holes or fragmentation drops.
-4. **Lightweight Daemon Footprint**: The userspace WireGuard engine, `HybridBind` dual transport, Trickle ICE STUN poller, and UNIX IPC daemon maintain a steady-state footprint of **~23.4 MB RAM (RSS)** and **0.5% CPU**.
-5. **TCP Throughput & Zero Retransmissions**: Sustained 3.56 Mbps throughput with **zero TCP retransmissions** (`Retr: 0`), smooth congestion window scaling (37.4 KB $\rightarrow$ 399 KB), and 100% bit-perfect 10MB binary payload transfers.
+4. **Interactive Remote Desktop (RDP / xrdp)**: Successfully streamed and operated a live interactive Linux desktop session across independent mobile carrier hotspots over `100.64.x.x:3389` with zero router port forwarding or public IP requirement.
+5. **Lightweight Daemon Footprint**: The userspace WireGuard engine, `HybridBind` dual transport, Trickle ICE STUN poller, and UNIX IPC daemon maintain a steady-state footprint of **~23.4 MB RAM (RSS)** and **0.5% CPU**.
+6. **TCP Throughput & Congestion Recovery**: Sustained throughput with smooth congestion window scaling (40.1 KB $\rightarrow$ 80.2 KB) and clean TCP backoff recovery across cellular uplinks.
 
 ---
 
@@ -149,12 +146,13 @@ Full raw logs, test outputs, and socket traces are recorded in [`project_info/pr
 
 Scale provides a flat, encrypted virtual network (`100.64.0.0/16`) where all enrolled devices communicate as if they are on the same local switch:
 
+- **Remote Desktop & Screen Sharing (xrdp & VNC)**: Take full interactive control of remote laptops or headless homelabs (`100.64.x.x:3389`) across cellular networks without public IPs or port forwarding.
 - **Localhost & API Sharing (ngrok Alternative)**: Expose local development servers (`localhost:3000`) directly to teammates over `100.64.x.x` without public URLs, data caps, or third-party proxies.
 - **Remote Database Access**: Connect GUI tools (DBeaver, pgAdmin, Compass) on one machine directly to local databases on another machine over private encrypted channels.
 - **Homelab & Remote SSH**: SSH into home servers or development rigs (`ssh user@100.64.x.x`) from coffee shops or mobile networks without port forwarding.
 - **Virtual LAN Gaming**: Play multiplayer LAN games (Minecraft, CS, retro emulators) with friends across different physical locations with direct IP connect.
 - **Direct P2P File Transfers**: Transfer multi-gigabyte datasets directly using standard tools (`scp`, `rsync`, LocalSend, or GUI SFTP) without cloud intermediate storage.
-- **Remote Game Streaming**: Stream high-end AAA games from a heavy GPU rig to a thin-and-light laptop at 60–120 FPS using **Sunshine** and **Moonlight** over the private overlay.
+- **Remote Game Streaming**: Stream high-end games from a GPU rig to a laptop over the private overlay using Sunshine/Moonlight.
 
 ---
 
