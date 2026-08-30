@@ -833,8 +833,8 @@ Accepted connection from 100.64.100.145, port 44864
 ```
 
 **Key Findings:**
-- **UDP Packet Loss Rate:** 🏆 **0.0% Loss (0 / 2,738 datagrams lost — 100% Delivery)**.
-- **Telecom-Grade Jitter:** 🏆 **3.343 ms**. Well below the telecom industry standard SLA of $< 30$ ms for jitter-free real-time audio, VoIP, and competitive gaming.
+- **UDP Packet Loss Rate:** **0.0% Loss (0 / 2,738 datagrams lost — 100% Delivery)**.
+- **Telecom-Grade Jitter:** **3.343 ms**. Well below the telecom industry standard SLA of $< 30$ ms for jitter-free real-time audio, VoIP, and competitive gaming.
 - **Peak Burst Throughput:** **7.04 Mbps** during interval 16.00–16.18s.
 - **Total Payload Delivered:** **3.57 MBytes** across 2,738 encrypted WireGuard frames over the WebSocket Relay.
 
@@ -864,7 +864,7 @@ Accepted connection from 100.64.100.145, port 44864
 | **ICMP Packet Delivery** | 100.0% (0% loss) | 98.0% (2% loss) | 92.0% (8% loss) | **96.0% (4% loss)** |
 | **Minimum RTT (Floor)** | 0.077 ms | 102.87 ms | 246.48 ms | **147.79 ms** |
 | **Average RTT Latency** | 0.077 ms | 119.99 ms | 372.28 ms | **531.08 ms** |
-| **UDP Jitter (`mdev`)** | $< 0.1$ ms | 19.58 ms | 75.14 ms | 🏆 **3.343 ms (Telecom-Grade)** |
-| **1420-Byte MTU Integrity** | 100% Intact | 100% Intact (0% loss) | 100% Intact (0% loss) | 🏆 **100% Intact (0% loss)** |
-| **UDP Datagram Loss Rate** | 0.0% | 0.0% (0 / 4,568) | 0.0% | 🏆 **0.0% (0 / 2,738 datagrams)** |
-| **Live GUI / App Verified** | Loopback I/O | Multi-Node Mesh | Multi-OS Mesh | 🏆 **Interactive Remote Desktop (xrdp)** |
+| **UDP Jitter (`mdev`)** | $< 0.1$ ms | 19.58 ms | 75.14 ms | **3.343 ms (Telecom-Grade)** |
+| **1420-Byte MTU Integrity** | 100% Intact | 100% Intact (0% loss) | 100% Intact (0% loss) | **100% Intact (0% loss)** |
+| **UDP Datagram Loss Rate** | 0.0% | 0.0% (0 / 4,568) | 0.0% | **0.0% (0 / 2,738 datagrams)** |
+| **Live GUI / App Verified** | Loopback I/O | Multi-Node Mesh | Multi-OS Mesh | **Interactive Remote Desktop (xrdp)** |

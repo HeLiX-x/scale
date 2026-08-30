@@ -124,17 +124,17 @@ Full raw logs, test outputs, and socket traces are recorded in [`project_info/pr
 | **Route Stability** | 100% Stable (0 Flaps) | **100% Stable (0 Flaps)** | **100% Stable (0 Flaps)** | **100% Stable (0 Flaps)** |
 | **ICMP Packet Loss** | 0.0% | **2.0% (49 / 50 delivered)** | **8.0% (46 / 50 delivered)** | **4.0% (48 / 50 delivered)** |
 | **Average Latency (RTT)** | 0.077 ms | **119.99 ms** | **372.28 ms** | **531.08 ms** |
-| **Jitter (`mdev`)** | $< 0.1$ ms | **19.58 ms** *(Telecom < 30ms)* | **75.14 ms** | 🏆 **3.343 ms (Telecom-Grade)** |
-| **1420-Byte MTU Integrity** | 100% Intact | **0.0% Loss (10 / 10 delivered)** | **0.0% Loss (10 / 10 delivered)** | 🏆 **0.0% Loss (10 / 10 delivered)** |
+| **Jitter (`mdev`)** | $< 0.1$ ms | **19.58 ms** *(Telecom < 30ms)* | **75.14 ms** | **3.343 ms (Telecom-Grade)** |
+| **1420-Byte MTU Integrity** | 100% Intact | **0.0% Loss (10 / 10 delivered)** | **0.0% Loss (10 / 10 delivered)** | **0.0% Loss (10 / 10 delivered)** |
 | **TCP Throughput (Peak)** | **40.0 Gbps** | ~3.56 Mbps (Cellular Constrained) | ~3.56 Mbps (6.29 Mbps peak) | **2.10 Mbps (718 Kbps reverse)** |
-| **UDP Stream Loss Rate** | 0.0% | **0.0% (0 / 4,568 packets)** | **0.0%** | 🏆 **0.0% (0 / 2,738 datagrams)** |
+| **UDP Stream Loss Rate** | 0.0% | **0.0% (0 / 4,568 packets)** | **0.0%** | **0.0% (0 / 2,738 datagrams)** |
 | **Client Memory (RSS)** | ~23.4 MB | **23.9 MB** | **23.9 MB** | **~23.4 MB** |
-| **Live GUI Workload** | Loopback I/O | Multi-Node Mesh | Multi-OS Mesh | 🏆 **Live Remote Desktop (xrdp/RDP)** |
+| **Live GUI Workload** | Loopback I/O | Multi-Node Mesh | Multi-OS Mesh | **Live Remote Desktop (xrdp/RDP)** |
 
 ### Detailed Test Summaries
 
 1. **Simultaneous Multi-Carrier Mesh**: Enrolled physical devices across isolated networks (Jio 5G, Airtel Residential Fiber, Jio 4G) into a single private `/16` overlay (`100.64.0.0/16`) with simultaneous, bidirectional 3-way routing and sub-second keepalive liveness.
-2. **🏆 Telecom-Grade Real-Time Jitter (`3.343 ms`)**: High-throughput UDP datagram streaming at 3.0 Mbps across the AWS Mumbai relay achieved an extraordinary **3.343 ms jitter** and **0.0% datagram loss (2,738 / 2,738 delivered)**, well surpassing the $< 30$ ms telecom SLA for VoIP, competitive gaming, and video streaming.
+2. **Telecom-Grade Real-Time Jitter (`3.343 ms`)**: High-throughput UDP datagram streaming at 3.0 Mbps across the AWS Mumbai relay achieved an extraordinary **3.343 ms jitter** and **0.0% datagram loss (2,738 / 2,738 delivered)**, well surpassing the $< 30$ ms telecom SLA for VoIP, competitive gaming, and video streaming.
 3. **WireGuard MTU Clamping (1420 Bytes)**: Full-size 1392-byte ICMP payloads (1420-byte WireGuard frames) achieved 0.0% packet loss across all carriers and OS environments, proving zero Path MTU (PMTU) black holes or fragmentation drops.
 4. **Interactive Remote Desktop (RDP / xrdp)**: Successfully streamed and operated a live interactive Linux desktop session across independent mobile carrier hotspots over `100.64.x.x:3389` with zero router port forwarding or public IP requirement.
 5. **Lightweight Daemon Footprint**: The userspace WireGuard engine, `HybridBind` dual transport, Trickle ICE STUN poller, and UNIX IPC daemon maintain a steady-state footprint of **~23.4 MB RAM (RSS)** and **0.5% CPU**.
